@@ -1101,6 +1101,8 @@ fn connection_pipeline(
                 channel_count: 2,
             });
 
+        let switch_default_devices = initial_settings.audio.linux_switch_default_devices;
+
         if mic.is_some() || audio_info.is_some() {
             let client_hostname = client_hostname.clone();
             thread::spawn(move || {
@@ -1113,6 +1115,7 @@ fn connection_pipeline(
                     audio_info,
                     &mut microphone_receiver,
                     mic,
+                    switch_default_devices,
                 );
             })
         } else {

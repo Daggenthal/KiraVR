@@ -1,10 +1,12 @@
-use alvr_common::{ConnectionError, anyhow::Result, debug, error, parking_lot::Mutex};
+use alvr_common::{ConnectionError, anyhow::Result, debug, error, info, parking_lot::Mutex, warn};
 use alvr_session::AudioBufferingConfig;
 use alvr_sockets::{StreamReceiver, StreamSender};
 
 use std::os::unix::fs::FileTypeExt;
 use std::{
+    cell::{Cell, RefCell},
     collections::VecDeque,
+    rc::Rc,
     fs, io,
     path::Path,
     sync::{
@@ -21,7 +23,11 @@ use pipewire::{
     core::CoreRc,
     keys,
     main_loop::MainLoopRc,
+    metadata::{Metadata, MetadataListener},
     properties,
+    registry::GlobalObject,
+    spa::utils::dict::DictRef,
+    types::ObjectType,
     spa::{
         param::audio::{AudioFormat, AudioInfoRaw},
         pod::{self, Pod, Value, serialize::PodSerializer},
@@ -84,6 +90,7 @@ pub fn audio_loop(
     speaker_info: Option<AudioInfo>,
     receiver: &mut StreamReceiver<()>,
     mic_info: Option<(AudioInfo, AudioBufferingConfig)>,
+    switch_default_devices: bool,
 ) {
     let sample_queue = Arc::new(Mutex::new(VecDeque::new()));
     MIC_STREAMING.store(false, Ordering::Relaxed);
@@ -100,8 +107,14 @@ pub fn audio_loop(
         let mic_info = mic_info.as_ref().map(|(info, _)| *info);
 
         move || {
-            if let Err(e) = pw_main_loop(pw_receiver, sender, speaker_info, sample_queue, mic_info)
-            {
+            if let Err(e) = pw_main_loop(
+                pw_receiver,
+                sender,
+                speaker_info,
+                sample_queue,
+                mic_info,
+                switch_default_devices,
+            ) {
                 error!("Unhandled pipewire audio device error, please report it on GitHub: {e}");
             }
             debug!("Pipewire audio loop exiting");
@@ -157,6 +170,7 @@ fn pw_main_loop(
     speaker_info: Option<AudioInfo>,
     sample_queue: Arc<Mutex<VecDeque<f32>>>,
     mic_info: Option<AudioInfo>,
+    switch_default_devices: bool,
 ) -> Result<(), pipewire::Error> {
     debug!("Starting pipewire thread");
     let mainloop = MainLoopRc::new(None)?;
@@ -168,6 +182,9 @@ fn pw_main_loop(
 
     let context = ContextRc::new(&mainloop, None)?;
     let pw_core = context.connect_rc(None)?;
+
+    let has_speaker = speaker_info.is_some();
+    let has_mic = mic_info.is_some();
 
     let _speaker = if let Some(info) = speaker_info {
         debug!("Creating pw output audio stream");
@@ -193,10 +210,276 @@ fn pw_main_loop(
         None
     };
 
+    let default_switch = if switch_default_devices && (has_speaker || has_mic) {
+        match DefaultDeviceSwitch::start(&pw_core, has_speaker, has_mic) {
+            Ok(switch) => Some(switch),
+            Err(e) => {
+                warn!("Could not switch the default audio devices to the headset: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     debug!("Running pipewire thread");
     mainloop.run();
 
+    if let Some(switch) = default_switch {
+        switch.restore(&mainloop, &pw_core);
+    }
+
     Ok(())
+}
+
+// KiraVR: Point the PipeWire defaults at the headset while streaming and put
+// back whatever the user had before. These are the same keys `wpctl
+// set-default` and desktop sound settings write.
+const SPEAKER_NODE_NAME: &str = "ALVR Audio";
+const MIC_NODE_NAME: &str = "ALVR Microphone";
+const DEFAULT_SINK_KEY: &str = "default.configured.audio.sink";
+const DEFAULT_SOURCE_KEY: &str = "default.configured.audio.source";
+// What the session manager is actually using right now. Used when the
+// configured value is missing or still names an ALVR node.
+const EFFECTIVE_SINK_KEY: &str = "default.audio.sink";
+const EFFECTIVE_SOURCE_KEY: &str = "default.audio.source";
+const JSON_TYPE: &str = "Spa:String:JSON";
+const RESTORE_TIMEOUT: Duration = Duration::from_millis(500);
+
+fn node_json(name: &str) -> String {
+    format!("{{\"name\":\"{name}\"}}")
+}
+
+fn is_alvr_node(value: &str) -> bool {
+    value.contains(SPEAKER_NODE_NAME) || value.contains(MIC_NODE_NAME)
+}
+
+#[derive(Default)]
+struct DefaultSwitchState {
+    metadata: RefCell<Option<Metadata>>,
+    metadata_listener: RefCell<Option<MetadataListener>>,
+    // The user's values from before the switch. None means the key was unset,
+    // so restoring removes it and the session manager picks a default again.
+    saved_sink: RefCell<Option<String>>,
+    saved_source: RefCell<Option<String>>,
+    effective_sink: RefCell<Option<String>>,
+    effective_source: RefCell<Option<String>>,
+    pending_apply: RefCell<Option<pipewire::spa::utils::result::AsyncSeq>>,
+    pending_restore: RefCell<Option<pipewire::spa::utils::result::AsyncSeq>>,
+    applied: Cell<bool>,
+    switch_sink: bool,
+    switch_source: bool,
+}
+
+struct DefaultDeviceSwitch {
+    state: Rc<DefaultSwitchState>,
+    _registry: pipewire::registry::RegistryRc,
+    _registry_listener: pipewire::registry::Listener,
+    _core_listener: pipewire::core::Listener,
+}
+
+impl DefaultDeviceSwitch {
+    fn start(pw_core: &CoreRc, switch_sink: bool, switch_source: bool) -> Result<Self, pipewire::Error> {
+        let state = Rc::new(DefaultSwitchState {
+            switch_sink,
+            switch_source,
+            ..Default::default()
+        });
+
+        // Apply once the server has answered the sync issued right after
+        // binding. By then it has sent the metadata's current values, so the
+        // user's defaults are saved before they are overwritten.
+        let core_listener = pw_core
+            .add_listener_local()
+            .done({
+                let state = Rc::clone(&state);
+                move |id, seq| {
+                    if id != pipewire::core::PW_ID_CORE {
+                        return;
+                    }
+                    if state.pending_apply.borrow().as_ref() == Some(&seq) {
+                        state.pending_apply.replace(None);
+                        state.apply();
+                    }
+                }
+            })
+            .register();
+
+        let registry = pw_core.get_registry_rc()?;
+        let registry_weak = registry.downgrade();
+        let registry_listener = registry
+            .add_listener_local()
+            .global({
+                let state = Rc::clone(&state);
+                let pw_core = pw_core.clone();
+                move |global: &GlobalObject<&DictRef>| {
+                    if global.type_ != ObjectType::Metadata
+                        || state.metadata.borrow().is_some()
+                        || global.props.and_then(|p| p.get("metadata.name")) != Some("default")
+                    {
+                        return;
+                    }
+                    let Some(registry) = registry_weak.upgrade() else {
+                        return;
+                    };
+                    let metadata: Metadata = match registry.bind(global) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("Could not bind the PipeWire default metadata: {e}");
+                            return;
+                        }
+                    };
+
+                    let listener = metadata
+                        .add_listener_local()
+                        .property({
+                            let state = Rc::clone(&state);
+                            move |subject, key, _type, value| {
+                                state.record(subject, key, value);
+                                0
+                            }
+                        })
+                        .register();
+
+                    state.metadata.replace(Some(metadata));
+                    state.metadata_listener.replace(Some(listener));
+
+                    match pw_core.sync(0) {
+                        Ok(seq) => {
+                            state.pending_apply.replace(Some(seq));
+                        }
+                        Err(e) => warn!("PipeWire sync failed, not switching audio defaults: {e}"),
+                    }
+                }
+            })
+            .register();
+
+        Ok(Self {
+            state,
+            _registry: registry,
+            _registry_listener: registry_listener,
+            _core_listener: core_listener,
+        })
+    }
+
+    // Puts the user's defaults back, then waits (bounded) for the server to
+    // take the change, since the connection closes right after this.
+    fn restore(self, mainloop: &MainLoopRc, pw_core: &CoreRc) {
+        let state = &self.state;
+        if !state.applied.get() {
+            return;
+        }
+        let Some(metadata) = state.metadata.borrow_mut().take() else {
+            return;
+        };
+
+        let put_back = |key: &str, saved: &Option<String>| match saved {
+            Some(value) => metadata.set_property(0, key, Some(JSON_TYPE), Some(value)),
+            None => metadata.set_property(0, key, None, None),
+        };
+        let pick = |saved: &RefCell<Option<String>>, effective: &RefCell<Option<String>>| {
+            saved.borrow().clone().or_else(|| effective.borrow().clone())
+        };
+        if state.switch_sink {
+            put_back(DEFAULT_SINK_KEY, &pick(&state.saved_sink, &state.effective_sink));
+        }
+        if state.switch_source {
+            put_back(DEFAULT_SOURCE_KEY, &pick(&state.saved_source, &state.effective_source));
+        }
+
+        let seq = match pw_core.sync(0) {
+            Ok(seq) => seq,
+            Err(e) => {
+                warn!("PipeWire sync failed while restoring audio defaults: {e}");
+                return;
+            }
+        };
+        state.pending_restore.replace(Some(seq));
+
+        let _done_listener = pw_core
+            .add_listener_local()
+            .done({
+                let state = Rc::clone(state);
+                let mainloop = mainloop.clone();
+                move |id, seq| {
+                    if id == pipewire::core::PW_ID_CORE
+                        && state.pending_restore.borrow().as_ref() == Some(&seq)
+                    {
+                        state.pending_restore.replace(None);
+                        mainloop.quit();
+                    }
+                }
+            })
+            .register();
+        let timeout = mainloop.loop_().add_timer({
+            let mainloop = mainloop.clone();
+            move |_| mainloop.quit()
+        });
+        timeout.update_timer(Some(RESTORE_TIMEOUT), None);
+
+        mainloop.run();
+
+        if state.pending_restore.borrow().is_some() {
+            warn!("PipeWire did not confirm the restored audio defaults in time");
+        } else {
+            info!("Restored the previous default audio devices");
+        }
+    }
+}
+
+impl DefaultSwitchState {
+    fn record(&self, subject: u32, key: Option<&str>, value: Option<&str>) {
+        // Only the user's values from before the switch matter, and never our
+        // own (a previous session that crashed before restoring leaves ALVR
+        // names behind, which must not be "restored").
+        if subject != 0 || self.applied.get() {
+            return;
+        }
+        let value = value.filter(|v| !is_alvr_node(v)).map(str::to_owned);
+        match key {
+            Some(DEFAULT_SINK_KEY) => {
+                self.saved_sink.replace(value);
+            }
+            Some(DEFAULT_SOURCE_KEY) => {
+                self.saved_source.replace(value);
+            }
+            Some(EFFECTIVE_SINK_KEY) => {
+                self.effective_sink.replace(value);
+            }
+            Some(EFFECTIVE_SOURCE_KEY) => {
+                self.effective_source.replace(value);
+            }
+            _ => (),
+        }
+    }
+
+    fn apply(&self) {
+        let metadata = self.metadata.borrow();
+        let Some(metadata) = metadata.as_ref() else {
+            return;
+        };
+        if self.switch_sink {
+            metadata.set_property(
+                0,
+                DEFAULT_SINK_KEY,
+                Some(JSON_TYPE),
+                Some(&node_json(SPEAKER_NODE_NAME)),
+            );
+        }
+        if self.switch_source {
+            metadata.set_property(
+                0,
+                DEFAULT_SOURCE_KEY,
+                Some(JSON_TYPE),
+                Some(&node_json(MIC_NODE_NAME)),
+            );
+        }
+        self.applied.set(true);
+        info!(
+            "Switched default audio devices to the headset (speaker: {}, microphone: {})",
+            self.switch_sink, self.switch_source
+        );
+    }
 }
 
 fn audio_info_to_vec(audio_info: AudioInfoRaw) -> Vec<u8> {

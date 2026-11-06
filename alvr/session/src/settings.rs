@@ -852,6 +852,16 @@ pub struct AudioConfig {
     )]
     #[cfg_attr(not(windows), schema(strings(display_name = "Headset microphone")))]
     pub microphone: Switch<MicrophoneConfig>,
+
+    // KiraVR: On Windows SteamVR switches devices through the HMD audio
+    // properties. On Linux nothing did, so users had to pick "ALVR Audio" and
+    // "ALVR Microphone" by hand every session.
+    #[cfg_attr(not(target_os = "linux"), schema(flag = "hidden"))]
+    #[schema(strings(
+        display_name = "Switch system audio to the headset",
+        help = "While streaming, make the headset speaker and microphone the default PipeWire output and input. The previous defaults are restored when streaming stops."
+    ))]
+    pub linux_switch_default_devices: bool,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -1953,6 +1963,7 @@ pub fn session_settings_default() -> SettingsDefault {
                     },
                 },
             },
+            linux_switch_default_devices: true,
         },
         headset: HeadsetConfigDefault {
             emulation_mode: HeadsetEmulationModeDefault {

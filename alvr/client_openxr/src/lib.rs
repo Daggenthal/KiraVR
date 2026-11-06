@@ -4,6 +4,7 @@ mod graphics;
 mod interaction;
 mod lobby;
 mod passthrough;
+mod perf_overlay;
 mod stream;
 
 use crate::stream::ParsedStreamConfig;

@@ -8,6 +8,7 @@
 mod c_api;
 mod connection;
 mod logging_backend;
+pub mod perf;
 mod sockets;
 mod statistics;
 mod storage;
@@ -36,6 +37,7 @@ use std::{
     time::Duration,
 };
 use storage::Config;
+pub use storage::OverlayPoses;
 
 pub use logging_backend::init_logging;
 
@@ -162,6 +164,30 @@ impl ClientCoreContext {
         dbg_client_core!("poll_event");
 
         self.event_queue.lock().pop_front()
+    }
+
+    // KiraVR: Numbers for the in-VR performance overlay.
+    pub fn perf_snapshot(&self) -> perf::PerfSnapshot {
+        self.connection_context.perf.lock().snapshot()
+    }
+
+    // KiraVR: Overlay settings changed in the dashboard since the last call.
+    // The outer None means no change.
+    pub fn take_overlay_config_update(
+        &self,
+    ) -> Option<Option<alvr_session::PerformanceOverlayConfig>> {
+        self.connection_context.overlay_config_update.lock().take()
+    }
+
+    // KiraVR: Where the overlay was moved to in VR, kept on the headset.
+    pub fn overlay_poses(&self) -> OverlayPoses {
+        Config::load().overlay_poses
+    }
+
+    pub fn store_overlay_poses(&self, poses: OverlayPoses) {
+        let mut config = Config::load();
+        config.overlay_poses = poses;
+        config.store();
     }
 
     pub fn send_battery(&self, device_id: u64, gauge_value: f32, is_plugged: bool) {

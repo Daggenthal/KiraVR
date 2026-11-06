@@ -1607,6 +1607,12 @@ pub struct NewVersionPopupConfig {
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct ExtraConfig {
+    #[schema(strings(
+        display_name = "Performance Overlay",
+        help = "Shows FPS, latency, bitrate, packet loss and jitter inside VR, drawn by the headset app. No extra app needed on the PC."
+    ))]
+    pub performance_overlay: Switch<PerformanceOverlayConfig>,
+
     #[schema(strings(display_name = "SteamVR Launcher"))]
     pub steamvr_launcher: SteamvrLauncher,
     pub capture: CaptureConfig,
@@ -1620,6 +1626,87 @@ It does not update in real time.")
 
     pub open_setup_wizard: bool,
     pub new_version_popup: Switch<NewVersionPopupConfig>,
+}
+
+// KiraVR: In-VR performance overlay, drawn by the headset app on top of the
+// stream. Shown and cycled (compact, full, hidden) with a controller shortcut.
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[schema(gui = "button_group")]
+pub enum PerformanceOverlayShortcut {
+    #[schema(strings(display_name = "Hold Both Thumbsticks"))]
+    BothThumbsticks,
+    #[schema(strings(display_name = "Hold Left Thumbstick + X"))]
+    LeftThumbstickAndX,
+    #[schema(strings(display_name = "Hold Right Thumbstick + A"))]
+    RightThumbstickAndA,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[schema(gui = "button_group")]
+pub enum PerformanceOverlayPosition {
+    // Fixed to the view. Offsets are in meters from the center of the view.
+    #[schema(strings(display_name = "In View"))]
+    InView {
+        #[schema(strings(display_name = "Left / Right", help = "Negative is left."))]
+        #[schema(gui(slider(min = -0.8, max = 0.8, step = 0.01)), suffix = " m")]
+        horizontal: f32,
+        #[schema(strings(display_name = "Up / Down", help = "Negative is down."))]
+        #[schema(gui(slider(min = -0.6, max = 0.6, step = 0.01)), suffix = " m")]
+        vertical: f32,
+        #[schema(strings(display_name = "Distance"))]
+        #[schema(gui(slider(min = 0.4, max = 3.0, step = 0.05)), suffix = " m")]
+        distance: f32,
+    },
+    // On the back of the wrist like a watch, fades in when turned toward the
+    // eyes.
+    #[schema(strings(display_name = "Left Wrist"))]
+    LeftWrist,
+    #[schema(strings(display_name = "Right Wrist"))]
+    RightWrist,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[schema(gui = "button_group")]
+pub enum PerformanceOverlayMode {
+    Hidden,
+    Compact,
+    Full,
+}
+
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, Debug)]
+pub struct PerformanceOverlayConfig {
+    #[schema(strings(
+        display_name = "Shortcut",
+        help = "Hold these controller buttons to cycle the overlay: Compact, Full, Hidden. Games still see the presses."
+    ))]
+    pub shortcut: PerformanceOverlayShortcut,
+
+    #[schema(strings(display_name = "Hold Time"))]
+    #[schema(gui(slider(min = 0.3, max = 3.0, step = 0.1)), suffix = "s")]
+    pub hold_seconds: f32,
+
+    #[schema(strings(
+        display_name = "Position",
+        help = "In View keeps it at a fixed spot in your view. On a wrist it sits like a watch and only shows when you turn the wrist toward your face."
+    ))]
+    pub position: PerformanceOverlayPosition,
+
+    #[schema(strings(display_name = "Size"))]
+    #[schema(gui(slider(min = 0.5, max = 2.0, step = 0.05)), suffix = "x")]
+    pub size: f32,
+
+    #[schema(strings(
+        display_name = "Grab Range",
+        help = "How far away a controller can grab the panel to move it: Point it at the panel and squeeze the grip. Grabbing it up close always works. Grab twice quickly to put it back."
+    ))]
+    #[schema(gui(slider(min = 0.1, max = 3.0, step = 0.05)), suffix = " m")]
+    pub grab_range: f32,
+
+    #[schema(strings(
+        display_name = "When Streaming Starts",
+        help = "How the overlay looks when the headset connects, before the shortcut is used."
+    ))]
+    pub initial_mode: PerformanceOverlayMode,
 }
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
@@ -2230,6 +2317,28 @@ pub fn session_settings_default() -> SettingsDefault {
             statistics_history_size: 256,
         },
         extra: ExtraConfigDefault {
+            performance_overlay: SwitchDefault {
+                enabled: true,
+                content: PerformanceOverlayConfigDefault {
+                    shortcut: PerformanceOverlayShortcutDefault {
+                        variant: PerformanceOverlayShortcutDefaultVariant::BothThumbsticks,
+                    },
+                    hold_seconds: 1.0,
+                    position: PerformanceOverlayPositionDefault {
+                        InView: PerformanceOverlayPositionInViewDefault {
+                            horizontal: -0.22,
+                            vertical: 0.12,
+                            distance: 1.0,
+                        },
+                        variant: PerformanceOverlayPositionDefaultVariant::InView,
+                    },
+                    size: 1.0,
+                    grab_range: 1.0,
+                    initial_mode: PerformanceOverlayModeDefault {
+                        variant: PerformanceOverlayModeDefaultVariant::Hidden,
+                    },
+                },
+            },
             logging: LoggingConfigDefault {
                 client_log_report_level: SwitchDefault {
                     enabled: true,

@@ -1233,6 +1233,7 @@ fn connection_pipeline(
     let statistics_thread = thread::spawn({
         let ctx = Arc::clone(&ctx);
         let client_hostname = client_hostname.clone();
+        let control_sender = Arc::clone(&control_sender);
         move || {
             while is_streaming(&client_hostname) {
                 let data = match statics_receiver.recv(STREAMING_RECV_TIMEOUT) {
@@ -1244,10 +1245,12 @@ fn connection_pipeline(
                     return;
                 };
 
+                let mut perf_snapshot = None;
                 if let Some(stats) = &mut *ctx.statistics_manager.write() {
                     let timestamp = client_stats.target_timestamp;
                     let decoder_latency = client_stats.video_decode;
                     let (network_latency, game_latency) = stats.report_statistics(client_stats);
+                    perf_snapshot = stats.take_perf_snapshot();
 
                     ctx.events_sender
                         .send(ServerCoreEvent::GameRenderLatencyFeedback(game_latency))
@@ -1261,6 +1264,15 @@ fn connection_pipeline(
                         decoder_latency,
                     );
                 }
+
+                // KiraVR: Overlay numbers for the headset, sent outside the
+                // statistics lock. ALVR clients ignore Reserved packets.
+                if let Some(perf) = perf_snapshot {
+                    control_sender
+                        .lock()
+                        .send(&ServerControlPacket::Reserved(perf.to_reserved()))
+                        .ok();
+                }
             }
         }
     });
@@ -1270,13 +1282,29 @@ fn connection_pipeline(
         let client_hostname = client_hostname.clone();
         move || {
             let mut previous_config = None;
+            let mut previous_overlay = None;
             while is_streaming(&client_hostname) {
-                let config = {
+                let (config, overlay) = {
                     let session_manager_lock = SESSION_MANAGER.read();
                     let settings = session_manager_lock.settings();
 
-                    RealTimeConfig::from_settings(settings)
+                    (
+                        RealTimeConfig::from_settings(settings),
+                        alvr_packets::overlay_config_to_reserved(
+                            &settings.extra.performance_overlay.as_option().cloned(),
+                        ),
+                    )
                 };
+
+                // KiraVR: Overlay settings apply live. Sent as Reserved,
+                // which ALVR clients ignore, only when they change.
+                if previous_overlay.as_ref() != Some(&overlay) {
+                    control_sender
+                        .lock()
+                        .send(&ServerControlPacket::Reserved(overlay.clone()))
+                        .ok();
+                    previous_overlay = Some(overlay);
+                }
 
                 let same_config = previous_config.as_ref().is_some_and(|prev| config == *prev);
                 if !same_config {

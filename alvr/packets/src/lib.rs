@@ -145,6 +145,57 @@ pub struct StreamConfigHead {
 
 pub const INCOMPATIBLE_NOTICE_KEY: &str = "kiravr_incompatible";
 
+// KiraVR: Live streamer-side numbers for the performance overlay, averaged
+// over the statistics window (0.5 s). Sent as ServerControlPacket::Reserved,
+// which ALVR clients ignore, so this needs no protocol change.
+pub const PERF_STATS_KEY: &str = "kiravr_perf";
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct PerfStats {
+    pub server_fps: f32,
+    pub client_fps: f32,
+    pub total_ms: f32,
+    pub game_ms: f32,
+    pub server_compositor_ms: f32,
+    pub encoder_ms: f32,
+    pub network_ms: f32,
+    pub decoder_ms: f32,
+    pub decoder_queue_ms: f32,
+    pub client_compositor_ms: f32,
+    pub vsync_queue_ms: f32,
+    pub bitrate_mbps: f32,
+}
+
+// KiraVR: The overlay settings, sent whenever they change in the dashboard so
+// the headset applies them without reconnecting. None means turned off.
+pub const OVERLAY_CONFIG_KEY: &str = "kiravr_overlay_config";
+
+pub fn overlay_config_to_reserved(
+    config: &Option<alvr_session::PerformanceOverlayConfig>,
+) -> String {
+    json::json!({ OVERLAY_CONFIG_KEY: config }).to_string()
+}
+
+// Outer None: Not an overlay config packet.
+pub fn overlay_config_from_reserved(
+    text: &str,
+) -> Option<Option<alvr_session::PerformanceOverlayConfig>> {
+    let value = json::from_str::<json::Value>(text).ok()?;
+    json::from_value(value.get(OVERLAY_CONFIG_KEY)?.clone()).ok()
+}
+
+impl PerfStats {
+    pub fn to_reserved(&self) -> String {
+        json::json!({ PERF_STATS_KEY: self }).to_string()
+    }
+
+    // None for Reserved packets that carry something else.
+    pub fn from_reserved(text: &str) -> Option<Self> {
+        let value = json::from_str::<json::Value>(text).ok()?;
+        json::from_value(value.get(PERF_STATS_KEY)?.clone()).ok()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct IncompatibleNotice {
     pub server_version: String,

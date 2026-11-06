@@ -1,8 +1,10 @@
 mod lobby;
+mod overlay;
 mod staging;
 mod stream;
 
 pub use lobby::*;
+pub use overlay::{OverlayAnchor, OverlayLine, OverlayRenderer};
 pub use stream::*;
 
 use alvr_common::{

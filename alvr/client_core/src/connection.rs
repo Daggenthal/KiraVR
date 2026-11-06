@@ -54,6 +54,7 @@ const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
 
 const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 const VIDEO_FRAME_METADATA_HISTORY_SIZE: usize = 128;
+const PERF_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 pub type DecoderCallback = dyn FnMut(Duration, &[u8]) -> bool + Send;
 
@@ -68,6 +69,9 @@ pub struct ConnectionContext {
     pub decoder_callback: Mutex<Option<Box<DecoderCallback>>>,
     pub video_frame_metadata_queue: Mutex<VecDeque<(Duration, VideoFrameMetadata)>>,
     pub max_prediction: RwLock<Duration>,
+    pub perf: Mutex<crate::perf::PerfTracker>,
+    // KiraVR: Latest overlay settings from the dashboard, taken by the app.
+    pub overlay_config_update: Mutex<Option<Option<alvr_session::PerformanceOverlayConfig>>>,
 }
 
 fn set_hud_message(event_queue: &Mutex<VecDeque<ClientCoreEvent>>, message: &str) {
@@ -287,10 +291,13 @@ fn connection_pipeline(
 
     ctx.video_frame_metadata_queue.lock().clear();
 
+    *ctx.perf.lock() = crate::perf::PerfTracker::default();
+
     let video_receive_thread = thread::spawn({
         let ctx = Arc::clone(&ctx);
         move || {
             let mut stream_corrupted = true;
+            let mut last_perf_log = Instant::now();
             while is_streaming(&ctx) {
                 let data = match video_receiver.recv(STREAMING_RECV_TIMEOUT) {
                     Ok(data) => data,
@@ -303,6 +310,20 @@ fn connection_pipeline(
 
                 if let Some(stats) = &mut *ctx.statistics_manager.lock() {
                     stats.report_video_packet_received(header.timestamp);
+                }
+
+                ctx.perf.lock().on_video_packet(data.lost_packets());
+                if last_perf_log.elapsed() > PERF_LOG_INTERVAL {
+                    last_perf_log = Instant::now();
+                    let snapshot = ctx.perf.lock().snapshot();
+                    info!(
+                        "Perf: {:.1} fps received, {:.2}% loss, {:.2} ms jitter, {} lost total, streamer {:?}",
+                        snapshot.client.received_fps,
+                        snapshot.client.loss_percent,
+                        snapshot.client.jitter_ms,
+                        snapshot.client.lost_total,
+                        snapshot.server
+                    );
                 }
 
                 if header.is_idr {
@@ -515,9 +536,16 @@ fn connection_pipeline(
                         error!("Unexpected StartStream paceket");
                     }
                     Ok(ServerControlPacket::KeepAlive) => (),
-                    Ok(
-                        ServerControlPacket::Reserved(_) | ServerControlPacket::ReservedBuffer(_),
-                    ) => {}
+                    Ok(ServerControlPacket::Reserved(text)) => {
+                        if let Some(stats) = alvr_packets::PerfStats::from_reserved(&text) {
+                            ctx.perf.lock().on_server_stats(stats);
+                        } else if let Some(config) =
+                            alvr_packets::overlay_config_from_reserved(&text)
+                        {
+                            *ctx.overlay_config_update.lock() = Some(config);
+                        }
+                    }
+                    Ok(ServerControlPacket::ReservedBuffer(_)) => {}
                     Err(ConnectionError::TryAgain(_)) => {
                         if Instant::now() > disconnection_deadline {
                             info!("{CONNECTION_TIMEOUT_MESSAGE}");

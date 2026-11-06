@@ -47,6 +47,8 @@ pub struct ParsedStreamConfig {
     pub buffering_history_weight: f32,
     pub decoder_options: Vec<(String, MediacodecProperty)>,
     pub interaction_sources: InteractionSourcesConfig,
+    pub performance_overlay: Option<alvr_session::PerformanceOverlayConfig>,
+    pub wired: bool,
 }
 
 impl ParsedStreamConfig {
@@ -76,6 +78,13 @@ impl ParsedStreamConfig {
             buffering_history_weight: config.settings.video.buffering_history_weight,
             decoder_options: config.settings.video.mediacodec_extra_options.clone(),
             interaction_sources: InteractionSourcesConfig::new(config),
+            performance_overlay: config
+                .settings
+                .extra
+                .performance_overlay
+                .as_option()
+                .cloned(),
+            wired: config.negotiated_config.wired,
         }
     }
 }
@@ -95,6 +104,15 @@ pub struct StreamContext {
     renderer: StreamRenderer,
     decoder: Option<(VideoDecoderConfig, VideoDecoderSource)>,
     use_custom_reprojection: bool,
+    // KiraVR: In-VR performance overlay. Always present so it can be turned
+    // on from the dashboard mid-session, disabled while off.
+    perf_overlay: Option<crate::perf_overlay::PerfOverlay>,
+    perf_overlay_config: crate::perf_overlay::SharedOverlayConfig,
+    perf_overlay_triggers: Arc<std::sync::atomic::AtomicUsize>,
+    perf_overlay_grips: Arc<[std::sync::atomic::AtomicBool; 2]>,
+    // Raw controller grip poses (stage space) from the input thread. Locating
+    // the grip space from the render thread came back invalid every frame.
+    perf_overlay_grip_poses: Arc<alvr_common::parking_lot::Mutex<[Option<Pose>; 2]>>,
 }
 
 impl StreamContext {
@@ -241,7 +259,26 @@ impl StreamContext {
             target_view_resolution,
             renderer,
             decoder: None,
+            perf_overlay: None,
+            perf_overlay_config: Arc::new(alvr_common::parking_lot::Mutex::new(None)),
+            perf_overlay_triggers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            perf_overlay_grip_poses: Arc::new(alvr_common::parking_lot::Mutex::new([None; 2])),
+            perf_overlay_grips: Arc::new([
+                std::sync::atomic::AtomicBool::new(false),
+                std::sync::atomic::AtomicBool::new(false),
+            ]),
         };
+
+        *this.perf_overlay_config.lock() = this.config.performance_overlay.clone();
+        {
+            this.perf_overlay = Some(crate::perf_overlay::PerfOverlay::new(
+                this.config.performance_overlay.as_ref(),
+                Arc::clone(&this.perf_overlay_triggers),
+                Arc::clone(&this.perf_overlay_grips),
+                this.renderer.overlay(),
+                this.core_context.overlay_poses(),
+            ));
+        }
 
         this.update_reference_space();
 
@@ -285,6 +322,12 @@ impl StreamContext {
             let view_reference_space = Arc::clone(&self.view_reference_space);
             let refresh_rate = self.config.refresh_rate_hint;
             let running = Arc::clone(&self.input_thread_running);
+            let grip_poses = Arc::clone(&self.perf_overlay_grip_poses);
+            let shortcut = Some(crate::perf_overlay::ShortcutDetector::new(
+                Arc::clone(&self.perf_overlay_config),
+                Arc::clone(&self.perf_overlay_triggers),
+                Arc::clone(&self.perf_overlay_grips),
+            ));
             move || {
                 stream_input_loop(
                     &core_ctx,
@@ -294,6 +337,8 @@ impl StreamContext {
                     &view_reference_space,
                     refresh_rate,
                     running,
+                    shortcut,
+                    grip_poses,
                 )
             }
         }));
@@ -430,6 +475,46 @@ impl StreamContext {
             openxr_display_time = vsync_time;
         }
 
+        // Overlay settings changed in the dashboard apply right away.
+        if let Some(update) = self.core_context.take_overlay_config_update() {
+            *self.perf_overlay_config.lock() = update.clone();
+            if let Some(overlay) = &mut self.perf_overlay {
+                overlay.apply_config(self.renderer.overlay(), update.as_ref());
+            }
+        }
+
+        if let Some(overlay) = &mut self.perf_overlay {
+            let info = crate::perf_overlay::StreamInfo {
+                view_resolution: self.config.view_resolution,
+                refresh_hz: self.config.refresh_rate_hint,
+                codec: self.decoder.as_ref().map(|(config, _)| config.codec),
+                wired: self.config.wired,
+            };
+            let grips = *self.perf_overlay_grip_poses.lock();
+            overlay.frame(
+                self.renderer.overlay(),
+                &self.core_context,
+                &info,
+                &output_view_params,
+                grips,
+            );
+
+            let interaction = self.interaction_context.read();
+            for haptic in overlay.take_haptics() {
+                interaction.hands_interaction[haptic.hand]
+                    .vibration_action
+                    .apply_feedback(
+                        &self.xr_session,
+                        xr::Path::NULL,
+                        &xr::HapticVibration::new()
+                            .amplitude(haptic.amplitude)
+                            .frequency(0.0)
+                            .duration(xr::Duration::from_nanos(haptic.duration.as_nanos() as _)),
+                    )
+                    .ok();
+            }
+        }
+
         self.renderer.render(
             buffer_ptr,
             [
@@ -534,6 +619,8 @@ fn stream_input_loop(
     view_reference_space: &xr::Space,
     refresh_rate: f32,
     running: Arc<RelaxedAtomic>,
+    mut shortcut: Option<crate::perf_overlay::ShortcutDetector>,
+    grip_poses: Arc<alvr_common::parking_lot::Mutex<[Option<Pose>; 2]>>,
 ) {
     let mut last_controller_poses = [Pose::IDENTITY; 2];
     let mut last_palm_poses = [Pose::IDENTITY; 2];
@@ -601,6 +688,15 @@ fn stream_input_loop(
             &mut last_palm_poses[1],
         );
 
+        // KiraVR: Raw grip poses (before pose_offset) for the overlay's wrist
+        // placement, None while a controller is not tracked.
+        *grip_poses.lock() = [
+            left_hand_data.grip_motion.map(|_| last_controller_poses[0]),
+            right_hand_data
+                .grip_motion
+                .map(|_| last_controller_poses[1]),
+        ];
+
         // Note: When multimodal input is enabled, we are sure that when free hands are used
         // (not holding controllers) the controller data is None.
         if (int_ctx.multimodal_hands_enabled || left_hand_data.skeleton_joints.is_none())
@@ -664,6 +760,9 @@ fn stream_input_loop(
 
         let button_entries =
             interaction::update_buttons(&xr_session, &interaction_ctx.read().button_actions);
+        if let Some(shortcut) = &mut shortcut {
+            shortcut.update(&button_entries);
+        }
         if !button_entries.is_empty() {
             core_ctx.send_buttons(button_entries);
         }

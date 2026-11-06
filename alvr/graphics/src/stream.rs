@@ -57,6 +57,7 @@ pub struct StreamRenderer {
     foveated_encoding: Option<AlvrFoveatedEncodingParams>,
     foveation_buffer: Buffer,
     last_foveation_center_shifts: Cell<Option<[Vec2; 2]>>,
+    overlay: crate::OverlayRenderer,
 }
 
 impl StreamRenderer {
@@ -274,6 +275,8 @@ impl StreamRenderer {
             fix_limited_range,
         );
 
+        let overlay = crate::OverlayRenderer::new(Rc::clone(&context), target_format);
+
         Self {
             context,
             staging_renderer,
@@ -282,7 +285,13 @@ impl StreamRenderer {
             foveated_encoding,
             foveation_buffer,
             last_foveation_center_shifts: Cell::new(None),
+            overlay,
         }
+    }
+
+    // KiraVR: The in-VR performance overlay drawn on top of the stream.
+    pub fn overlay(&self) -> &crate::OverlayRenderer {
+        &self.overlay
     }
 
     /// Runtime foveation centers must already be encoder-aligned. `None` uses the negotiated centers.
@@ -321,6 +330,7 @@ impl StreamRenderer {
             .device
             .create_command_encoder(&Default::default());
 
+        let all_views = &view_params;
         for (view_idx, view_params) in view_params.iter().enumerate() {
             let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: None,
@@ -390,6 +400,9 @@ impl StreamRenderer {
             render_pass.set_bind_group(0, &self.views_objects[view_idx].bind_group, &[]);
             set_passthrough_push_constants(&mut render_pass, passthrough);
             render_pass.draw(0..4, 0..1);
+
+            // KiraVR: Performance overlay on top of the stream.
+            self.overlay.draw(&mut render_pass, all_views, view_idx);
         }
 
         self.context.queue.submit(iter::once(encoder.finish()));

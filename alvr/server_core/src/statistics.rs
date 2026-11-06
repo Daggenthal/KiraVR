@@ -1,6 +1,6 @@
 use alvr_common::{HEAD_ID, SlidingWindowAverage};
 use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSummary};
-use alvr_packets::ClientStatistics;
+use alvr_packets::{ClientStatistics, PerfStats};
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
@@ -40,7 +40,56 @@ struct BatteryData {
     is_plugged: bool,
 }
 
+// KiraVR: Sums over one summary window, averaged into a PerfStats snapshot for
+// the headset's performance overlay. Single frames are too noisy to read.
+#[derive(Default)]
+struct PerfWindow {
+    frames: u32,
+    sums_s: [f32; 9],
+    client_fps: f32,
+    server_fps: f32,
+}
+
+impl PerfWindow {
+    // Order: total, game, server compositor, encoder, network, decoder,
+    // decoder queue, client compositor, vsync queue.
+    fn add(&mut self, latencies: [Duration; 9], client_fps: f32, server_fps: f32) {
+        self.frames += 1;
+        for (sum, latency) in self.sums_s.iter_mut().zip(latencies) {
+            *sum += latency.as_secs_f32();
+        }
+        self.client_fps += client_fps;
+        self.server_fps += server_fps;
+    }
+
+    fn take(&mut self, bitrate_mbps: f32) -> Option<PerfStats> {
+        if self.frames == 0 {
+            return None;
+        }
+        let n = self.frames as f32;
+        let ms = |i: usize| self.sums_s[i] / n * 1000.0;
+        let stats = PerfStats {
+            server_fps: self.server_fps / n,
+            client_fps: self.client_fps / n,
+            total_ms: ms(0),
+            game_ms: ms(1),
+            server_compositor_ms: ms(2),
+            encoder_ms: ms(3),
+            network_ms: ms(4),
+            decoder_ms: ms(5),
+            decoder_queue_ms: ms(6),
+            client_compositor_ms: ms(7),
+            vsync_queue_ms: ms(8),
+            bitrate_mbps,
+        };
+        *self = Self::default();
+        Some(stats)
+    }
+}
+
 pub struct StatisticsManager {
+    perf_window: PerfWindow,
+    perf_snapshot: Option<PerfStats>,
     history_buffer: VecDeque<HistoryFrame>,
     max_history_size: usize,
     last_full_report_instant: Instant,
@@ -66,6 +115,8 @@ impl StatisticsManager {
         steamvr_pipeline_frames: f32,
     ) -> Self {
         Self {
+            perf_window: PerfWindow::default(),
+            perf_snapshot: None,
             history_buffer: VecDeque::new(),
             max_history_size,
             last_full_report_instant: Instant::now(),
@@ -218,6 +269,22 @@ impl StatisticsManager {
             let server_fps =
                 1.0 / Duration::max(self.last_frame_present_interval, EPS_INTERVAL).as_secs_f32();
 
+            self.perf_window.add(
+                [
+                    client_stats.total_pipeline_latency,
+                    game_time_latency,
+                    server_compositor_latency,
+                    encoder_latency,
+                    network_latency,
+                    client_stats.video_decode,
+                    client_stats.video_decoder_queue,
+                    client_stats.rendering,
+                    client_stats.vsync_queue,
+                ],
+                client_fps,
+                server_fps,
+            );
+
             if self.last_full_report_instant + FULL_REPORT_INTERVAL < Instant::now() {
                 self.last_full_report_instant += FULL_REPORT_INTERVAL;
 
@@ -252,6 +319,10 @@ impl StatisticsManager {
                         .is_plugged,
                 }));
 
+                self.perf_snapshot = self
+                    .perf_window
+                    .take(self.video_bytes_partial_sum as f32 * 8. / 1e6 / interval_secs);
+
                 self.video_packets_partial_sum = 0;
                 self.video_bytes_partial_sum = 0;
             }
@@ -285,6 +356,11 @@ impl StatisticsManager {
         } else {
             (Duration::ZERO, Duration::ZERO)
         }
+    }
+
+    // The latest overlay snapshot, once per summary window.
+    pub fn take_perf_snapshot(&mut self) -> Option<PerfStats> {
+        self.perf_snapshot.take()
     }
 
     pub fn motion_to_photon_latency_average(&self) -> Duration {

@@ -20,6 +20,20 @@ fn config_path() -> PathBuf {
 pub struct Config {
     pub hostname: String,
     pub protocol_id: String,
+    // KiraVR: Where the performance overlay was moved to in VR. Defaulted so
+    // config files from before this field still parse (a parse failure resets
+    // the whole config, hostname included, which means trusting again).
+    #[serde(default)]
+    pub overlay_poses: OverlayPoses,
+}
+
+// Panel poses relative to their anchor: The wrist's controller grip, or the
+// head for In View. None means the built-in placement.
+#[derive(Serialize, Deserialize, Clone, Copy, Default, Debug)]
+pub struct OverlayPoses {
+    pub left_wrist: Option<alvr_common::Pose>,
+    pub right_wrist: Option<alvr_common::Pose>,
+    pub in_view: Option<alvr_common::Pose>,
 }
 
 impl Default for Config {
@@ -35,6 +49,7 @@ impl Default for Config {
                 rng.random_range(0..10),
             ),
             protocol_id: alvr_common::protocol_id(),
+            overlay_poses: OverlayPoses::default(),
         }
     }
 }

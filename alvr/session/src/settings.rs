@@ -858,7 +858,7 @@ pub struct AudioConfig {
     // microphone by hand every session.
     #[cfg_attr(not(target_os = "linux"), schema(flag = "hidden"))]
     #[schema(strings(
-        display_name = "Switch system audio to the headset",
+        display_name = "Switch System Audio to the Headset",
         help = "While streaming, make the headset speaker and microphone the default PipeWire output and input. The previous defaults are restored when streaming stops."
     ))]
     pub linux_switch_default_devices: bool,

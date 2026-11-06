@@ -63,10 +63,10 @@ pub enum Fix {
 impl Fix {
     pub fn label(&self) -> &'static str {
         match self {
-            Fix::DisablePrism => "Turn off usePrism",
-            Fix::DisableSteamVrHome => "Turn off SteamVR Home",
-            Fix::KillLeftovers(_) => "Close leftover SteamVR processes",
-            Fix::AddFirewallRules => "Add firewall rules",
+            Fix::DisablePrism => "Turn Off Prism Mode",
+            Fix::DisableSteamVrHome => "Turn Off SteamVR Home",
+            Fix::KillLeftovers(_) => "Close Leftover SteamVR Processes",
+            Fix::AddFirewallRules => "Add Firewall Rules",
         }
     }
 }
@@ -146,7 +146,7 @@ pub fn apply_fix(fix: &Fix, layout: &alvr_filesystem::Layout) -> Result<String> 
             edit_steamvr_settings(|steamvr| {
                 steamvr.insert("usePrism".into(), Value::Bool(false));
             })?;
-            Ok("Turned off usePrism in SteamVR's settings.".into())
+            Ok("Turned off Prism mode in SteamVR's settings.".into())
         }
         Fix::DisableSteamVrHome => {
             edit_steamvr_settings(|steamvr| {
@@ -433,7 +433,7 @@ fn steamvr_installed() -> Check {
 }
 
 fn leftover_processes() -> Check {
-    const TITLE: &str = "SteamVR processes";
+    const TITLE: &str = "SteamVR Processes";
     let system = System::new_all();
     if crate::steamvr_launcher::is_steamvr_running() {
         return Check::new(TITLE, Status::Ok, "SteamVR is running.");
@@ -463,19 +463,28 @@ fn leftover_processes() -> Check {
     .with_fix(Fix::KillLeftovers(leftovers.into_iter().map(|(pid, _)| pid).collect()))
 }
 
+// Prism is a newer, undocumented SteamVR render host (vrprismhost, off by
+// default in desktop SteamVR). It talks to drivers through internal interfaces
+// and has its own VRInitError_Init_PrismNeedsNewDrivers, so a public-API
+// driver like ours cannot run under it. On the PC only the Lighthouse driver
+// references it, Steam Link (which Steam Frame streams through) does not. It
+// may be the default in the Frame's own on-headset SteamVR, unverified.
+// Revisit when Valve documents it.
 fn prism() -> Check {
-    const TITLE: &str = "SteamVR Prism";
+    const TITLE: &str = "SteamVR Prism Mode";
     let on = steamvr_bool("usePrism").unwrap_or(false);
     if on {
         Check::new(
             TITLE,
             Status::Error,
-            "SteamVR's \"usePrism\" setting is on. With KiraVR as the headset driver Prism never starts, \
-            and SteamVR restarts itself every couple of minutes (error 156).",
+            "SteamVR's experimental Prism mode (\"usePrism\") is on. It is off by default in desktop SteamVR \
+            and does not work with KiraVR yet: Prism needs drivers built against interfaces Valve has not published, it never \
+            starts, and SteamVR restarts itself every couple of minutes (error 156). Turning it off returns \
+            SteamVR to its standard mode.",
         )
         .with_fix(Fix::DisablePrism)
     } else {
-        Check::new(TITLE, Status::Ok, "usePrism is off.")
+        Check::new(TITLE, Status::Ok, "Prism mode is off (SteamVR's default).")
     }
 }
 
@@ -509,7 +518,7 @@ fn steamvr_home() -> Check {
 }
 
 fn launch_options() -> Check {
-    const TITLE: &str = "SteamVR launch options";
+    const TITLE: &str = "SteamVR Launch Options";
     const WHERE: &str =
         "Change them in Steam: Library, right-click SteamVR, Properties, General, Launch Options.";
     let Some(root) = steam_root() else {
@@ -628,7 +637,7 @@ fn firewall() -> Check {
 }
 
 fn render_node() -> Check {
-    const TITLE: &str = "GPU access";
+    const TITLE: &str = "GPU Access";
     let mut nodes = fs::read_dir("/dev/dri")
         .map(|d| {
             d.flatten()
@@ -666,7 +675,7 @@ fn render_node() -> Check {
 }
 
 fn vaapi() -> Check {
-    const TITLE: &str = "Hardware encoding (VA-API)";
+    const TITLE: &str = "Hardware Encoding (VA-API)";
     let Some(display) = libva::Display::open() else {
         return Check::new(
             TITLE,
@@ -708,7 +717,7 @@ fn vaapi() -> Check {
 }
 
 fn vulkan_layers() -> Check {
-    const TITLE: &str = "Vulkan layers";
+    const TITLE: &str = "Vulkan Layers";
     let home = home_dir();
     let data_home = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -846,7 +855,7 @@ pub fn print_report(apply_fixes: bool, layout: &alvr_filesystem::Layout) -> i32 
         }
     };
 
-    println!("{}", paint("1", "KiraVR system check"));
+    println!("{}", paint("1", "KiraVR System Check"));
     let mut worst = Status::Ok;
     for (name, check) in CHECKS {
         let start = Instant::now();

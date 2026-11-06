@@ -134,16 +134,21 @@ impl MultiplexedSocketReader for MultiplexedTcpReader {
         } else {
             let mut prefix_bytes = [0u8; PACKET_PREFIX_SIZE];
 
-            loop {
-                let count = self
-                    .inner
-                    .peek(unsafe {
-                        &mut *(&mut prefix_bytes as *mut [u8] as *mut [MaybeUninit<u8>])
-                    })
-                    .handle_try_again()?;
-                if count == PACKET_PREFIX_SIZE {
-                    break;
-                }
+            // KiraVR: peek() returns 0 at once, forever, after the peer closes
+            // the connection, so the old loop here spun at full CPU and never
+            // returned. The stream thread then never saw that streaming had
+            // ended, which hung the shutdown (wired clients, through adb) past
+            // SteamVR's 10 s driver watchdog. Report the close, and hand back
+            // on a partial prefix so the caller keeps checking its state.
+            let count = self
+                .inner
+                .peek(unsafe { &mut *(&mut prefix_bytes as *mut [u8] as *mut [MaybeUninit<u8>]) })
+                .handle_try_again()?;
+            if count == 0 {
+                con_bail!("Connection closed by the peer");
+            }
+            if count < PACKET_PREFIX_SIZE {
+                return alvr_common::try_again();
             }
 
             let stream_id = u16::from_le_bytes(prefix_bytes[0..2].try_into().unwrap());

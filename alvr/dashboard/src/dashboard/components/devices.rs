@@ -66,7 +66,7 @@ impl DevicesTab {
                             ui.add_space(theme::FRAME_TEXT_SPACING);
                             ui.heading(
                                 RichText::new(
-                                    "ALVR requires running SteamVR! \
+                                    "KiraVR requires running SteamVR! \
                                     Devices will not be discovered or connected.",
                                 )
                                 .color(Color32::BLACK)
@@ -84,8 +84,25 @@ impl DevicesTab {
                 });
         }
 
+        // KiraVR: Without a running server nothing can be connected, whatever
+        // state the server last saved. A server that was killed mid-shutdown
+        // left "Disconnecting" in the session, which showed here until the
+        // next launch.
+        let shown_trusted = self.trusted_devices.as_ref().map(|clients| {
+            clients
+                .iter()
+                .cloned()
+                .map(|(hostname, mut config)| {
+                    if !connected_to_server {
+                        config.connection_state = ConnectionState::Disconnected;
+                    }
+                    (hostname, config)
+                })
+                .collect::<Vec<_>>()
+        });
+
         ui.vertical_centered_justified(|ui| {
-            if let Some(clients) = &mut self.trusted_devices
+            if let Some(clients) = &shown_trusted
                 && let Some(request) = wired_client_section(
                     ui,
                     clients
@@ -107,7 +124,7 @@ impl DevicesTab {
 
             ui.add_space(theme::FRAME_PADDING);
 
-            if let Some(clients) = &mut self.trusted_devices
+            if let Some(clients) = &shown_trusted
                 && let Some(request) = trusted_clients_section(
                     ui,
                     clients

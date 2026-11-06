@@ -95,7 +95,8 @@ impl Check {
     }
 }
 
-const CHECKS: [(&str, fn() -> Check); 10] = [
+const CHECKS: [(&str, fn() -> Check); 11] = [
+    ("steam_install", steam_install),
     ("steamvr_installed", steamvr_installed),
     ("leftover_processes", leftover_processes),
     ("prism", prism),
@@ -103,7 +104,7 @@ const CHECKS: [(&str, fn() -> Check); 10] = [
     ("launch_options", launch_options),
     ("firewall", firewall),
     ("render_node", render_node),
-    ("vaapi", vaapi),
+    ("hardware_encoding", hardware_encoding),
     ("vulkan_layers", vulkan_layers),
     ("network", network),
 ];
@@ -674,45 +675,192 @@ fn render_node() -> Check {
     }
 }
 
-fn vaapi() -> Check {
-    const TITLE: &str = "Hardware Encoding (VA-API)";
+// GPU vendors by PCI ID, from the render nodes' sysfs entries.
+fn gpu_vendors() -> Vec<&'static str> {
+    let mut vendors = vec![];
+    if let Ok(entries) = fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("renderD") {
+                continue;
+            }
+            let id = fs::read_to_string(entry.path().join("device/vendor")).unwrap_or_default();
+            let vendor = match id.trim() {
+                "0x1002" => "AMD",
+                "0x8086" => "Intel",
+                "0x10de" => "NVIDIA",
+                _ => continue,
+            };
+            if !vendors.contains(&vendor) {
+                vendors.push(vendor);
+            }
+        }
+    }
+    vendors
+}
+
+// Opens a real encode session (config, surfaces, context), like the stream
+// does. Some drivers list an encoder and then fail to open it, which used to
+// surface only as a black screen once streaming started.
+fn open_vaapi_encoder(
+    display: &std::rc::Rc<libva::Display>,
+    profile: libva::VAProfile::Type,
+    entrypoint: libva::VAEntrypoint::Type,
+) -> Result<(), String> {
+    const WIDTH: u32 = 1920;
+    const HEIGHT: u32 = 1088;
+    let format = libva::constants::VA_RT_FORMAT_YUV420;
+    let attrs = vec![libva::VAConfigAttrib {
+        type_: libva::VAConfigAttribType::VAConfigAttribRTFormat,
+        value: format,
+    }];
+    let config = display
+        .create_config(attrs, profile, entrypoint)
+        .map_err(|e| format!("config: {e:?}"))?;
+    let surfaces = display
+        .create_surfaces(format, None, WIDTH, HEIGHT, None, vec![(); 2])
+        .map_err(|e| format!("surfaces: {e:?}"))?;
+    display
+        .create_context(&config, WIDTH, HEIGHT, Some(&surfaces), true)
+        .map_err(|e| format!("context: {e:?}"))?;
+    Ok(())
+}
+
+fn hardware_encoding() -> Check {
+    const TITLE: &str = "Hardware Encoding";
+    let vendors = gpu_vendors();
+
+    // NVIDIA streams through NVENC, not VA-API.
+    if vendors == ["NVIDIA"] {
+        let found = [
+            "/usr/lib/libnvidia-encode.so.1",
+            "/usr/lib64/libnvidia-encode.so.1",
+            "/usr/lib/x86_64-linux-gnu/libnvidia-encode.so.1",
+        ]
+        .iter()
+        .any(|p| Path::new(p).exists());
+        return if found {
+            Check::new(
+                TITLE,
+                Status::Info,
+                "NVIDIA GPU with the NVENC library installed. Note that KiraVR's NVENC path is still \
+                untested on Linux, AMD and Intel are the tested setups.",
+            )
+        } else {
+            Check::new(
+                TITLE,
+                Status::Error,
+                "NVIDIA GPU, but the NVENC library (libnvidia-encode.so.1) was not found. Install your \
+                distribution's NVIDIA driver package that includes it.",
+            )
+        };
+    }
+
     let Some(display) = libva::Display::open() else {
         return Check::new(
             TITLE,
-            Status::Warning,
-            "VA-API is not available. AMD and Intel GPUs need it for hardware encoding (NVIDIA uses NVENC \
-            instead, so ignore this there).",
+            Status::Error,
+            format!(
+                "VA-API is not available, so the {} GPU cannot encode in hardware. Install your \
+                distribution's VA-API driver (Mesa for AMD, intel-media-driver for Intel).",
+                vendors.first().unwrap_or(&"current")
+            ),
         );
     };
-    let encoders = [
+    let vendor = display.query_vendor_string().unwrap_or_default();
+
+    let mut working = vec![];
+    let mut broken = vec![];
+    for (profile, name) in [
         (libva::VAProfile::VAProfileH264Main, "H.264"),
         (libva::VAProfile::VAProfileHEVCMain, "HEVC"),
         (libva::VAProfile::VAProfileAV1Profile0, "AV1"),
-    ]
-    .into_iter()
-    .filter(|(profile, _)| {
-        display.query_config_entrypoints(*profile).is_ok_and(|e| {
-            e.contains(&libva::VAEntrypoint::VAEntrypointEncSlice)
-                || e.contains(&libva::VAEntrypoint::VAEntrypointEncSliceLP)
-        })
-    })
-    .map(|(_, name)| name)
-    .collect::<Vec<_>>();
-    let vendor = display.query_vendor_string().unwrap_or_default();
-    if encoders.is_empty() {
-        Check::new(
+    ] {
+        let Ok(entrypoints) = display.query_config_entrypoints(profile) else {
+            continue;
+        };
+        let entrypoint = [
+            libva::VAEntrypoint::VAEntrypointEncSlice,
+            libva::VAEntrypoint::VAEntrypointEncSliceLP,
+        ]
+        .into_iter()
+        .find(|e| entrypoints.contains(e));
+        let Some(entrypoint) = entrypoint else {
+            continue;
+        };
+        match open_vaapi_encoder(&display, profile, entrypoint) {
+            Ok(()) => working.push(name),
+            Err(e) => broken.push(format!("{name} ({e})")),
+        }
+    }
+
+    if working.is_empty() {
+        let detail = if broken.is_empty() {
+            format!(
+                "VA-API ({vendor}) offers no video encoders. KiraVR would fall back to slow software encoding."
+            )
+        } else {
+            format!(
+                "VA-API ({vendor}) lists encoders but none of them opens: {}. KiraVR would fall back to slow \
+                software encoding.",
+                broken.join(", ")
+            )
+        };
+        return Check::new(TITLE, Status::Error, detail);
+    }
+    if !broken.is_empty() {
+        return Check::new(
             TITLE,
             Status::Warning,
             format!(
-                "VA-API ({vendor}) offers no video encoders. KiraVR would fall back to slow software encoding."
+                "{} work via {vendor}, but {} failed to open. Pick a working codec in Settings, Video, \
+                Preferred codec.",
+                working.join(", "),
+                broken.join(", ")
             ),
-        )
-    } else {
-        Check::new(
+        );
+    }
+    Check::new(
+        TITLE,
+        Status::Ok,
+        format!("{} open via {vendor}.", working.join(", ")),
+    )
+}
+
+// Flatpak Steam keeps its files in the Flatpak sandbox, which a dashboard
+// outside it cannot drive (the driver path and SteamVR settings live there).
+fn steam_install() -> Check {
+    const TITLE: &str = "Steam Install";
+    let Some(home) = home_dir() else {
+        return Check::new(TITLE, Status::Info, "HOME is not set, could not check.");
+    };
+    let native = home.join(".local/share/Steam/steamapps").exists()
+        || home.join(".steam/steam/steamapps").exists();
+    let flatpak = home
+        .join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps")
+        .exists()
+        || home
+            .join(".var/app/com.valvesoftware.Steam/data/Steam/steamapps")
+            .exists();
+    match (native, flatpak) {
+        (true, false) => Check::new(TITLE, Status::Ok, "Steam is installed natively."),
+        (true, true) => Check::new(
             TITLE,
-            Status::Ok,
-            format!("{} via {vendor}.", encoders.join(", ")),
-        )
+            Status::Info,
+            "Both a native and a Flatpak Steam are installed. KiraVR uses the native one, so start \
+            SteamVR from that Steam.",
+        ),
+        (false, true) => Check::new(
+            TITLE,
+            Status::Error,
+            "Steam is the Flatpak version. KiraVR cannot drive SteamVR inside the Flatpak sandbox yet. \
+            Install Steam from your distribution (not Flatpak) to use KiraVR.",
+        ),
+        (false, false) => Check::new(
+            TITLE,
+            Status::Error,
+            "Steam was not found. Install Steam first.",
+        ),
     }
 }
 

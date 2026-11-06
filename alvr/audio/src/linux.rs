@@ -6,9 +6,9 @@ use std::os::unix::fs::FileTypeExt;
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
-    rc::Rc,
     fs, io,
     path::Path,
+    rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -27,13 +27,13 @@ use pipewire::{
     properties,
     registry::GlobalObject,
     spa::utils::dict::DictRef,
-    types::ObjectType,
     spa::{
         param::audio::{AudioFormat, AudioInfoRaw},
         pod::{self, Pod, Value, serialize::PodSerializer},
         utils::Direction,
     },
     stream::{StreamFlags, StreamListener, StreamRc, StreamState},
+    types::ObjectType,
 };
 
 pub fn try_load_pipewire() -> Result<()> {
@@ -284,7 +284,11 @@ struct DefaultDeviceSwitch {
 }
 
 impl DefaultDeviceSwitch {
-    fn start(pw_core: &CoreRc, switch_sink: bool, switch_source: bool) -> Result<Self, pipewire::Error> {
+    fn start(
+        pw_core: &CoreRc,
+        switch_sink: bool,
+        switch_source: bool,
+    ) -> Result<Self, pipewire::Error> {
         let state = Rc::new(DefaultSwitchState {
             switch_sink,
             switch_source,
@@ -383,13 +387,22 @@ impl DefaultDeviceSwitch {
             None => metadata.set_property(0, key, None, None),
         };
         let pick = |saved: &RefCell<Option<String>>, effective: &RefCell<Option<String>>| {
-            saved.borrow().clone().or_else(|| effective.borrow().clone())
+            saved
+                .borrow()
+                .clone()
+                .or_else(|| effective.borrow().clone())
         };
         if state.switch_sink {
-            put_back(DEFAULT_SINK_KEY, &pick(&state.saved_sink, &state.effective_sink));
+            put_back(
+                DEFAULT_SINK_KEY,
+                &pick(&state.saved_sink, &state.effective_sink),
+            );
         }
         if state.switch_source {
-            put_back(DEFAULT_SOURCE_KEY, &pick(&state.saved_source, &state.effective_source));
+            put_back(
+                DEFAULT_SOURCE_KEY,
+                &pick(&state.saved_source, &state.effective_source),
+            );
         }
 
         let seq = match pw_core.sync(0) {

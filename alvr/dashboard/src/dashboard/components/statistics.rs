@@ -185,7 +185,12 @@ impl StatisticsTab {
                         stats.total_pipeline_latency_s,
                         theme::FG,
                     );
-                    label(ui, "KiraVR Latency", transmission_total_latency_s, theme::FG);
+                    label(
+                        ui,
+                        "KiraVR Latency",
+                        transmission_total_latency_s,
+                        theme::FG,
+                    );
                     label(
                         ui,
                         "Client System (not KiraVR latency)",

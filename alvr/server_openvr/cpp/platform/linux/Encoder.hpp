@@ -119,12 +119,11 @@ public:
     Encoder()
         : vkCtx(std::vector<u8> {}) { }
 
+    // Rebuilds the renderer for a new set of input textures. When the output
+    // image still fits, it moves into the new renderer and the encoder keeps
+    // running; check needsEncoderInit() afterwards. Only call this from the
+    // thread that runs present().
     void createImages(render::RendererCreateInfo rendererCI) {
-        if (renderer.hasValue()) {
-            renderer.get().destroy(vkCtx);
-            renderer.reset();
-        }
-
         auto const& settings = Settings_Instance();
 
         vk::Extent2D inExtent {
@@ -156,9 +155,33 @@ public:
             warpCapableChain = settings->m_enableFoveatedEncoding;
         }
 
+        // KiraVR: The old code destroyed the renderer, and with it the output
+        // image, while the encoder still referenced that image. Replacing the
+        // encoder in initEncoding then flushed it against freed memory and
+        // crashed vrserver (EncodePipelineVAAPI.cpp destructor). Now the output
+        // is either handed over intact or the encoder goes first.
+        std::optional<render::Output> keptOutput;
+        if (renderer.hasValue()) {
+            vkCtx.dev.waitIdle();
+            bool keep = encoder && frame
+                && render::Renderer::outputMatches(renderer.get().getOutput(), rendererCI);
+            if (keep) {
+                keptOutput = renderer.get().releaseOutput();
+            } else {
+                encoder.reset();
+                frame.reset();
+            }
+            renderer.get().destroy(vkCtx);
+            renderer.reset();
+        }
+
         outExtent = rendererCI.outputExtent;
-        renderer.emplace(vkCtx, rendererCI, pipeCIs);
+        renderer.emplace(vkCtx, rendererCI, pipeCIs, keptOutput);
     }
+
+    // False when createImages kept the running encoder, so initEncoding and
+    // its IDR can be skipped.
+    bool needsEncoderInit() const { return !encoder || !frame; }
 
     void initEncoding() {
         auto const& settings = Settings_Instance();
@@ -199,6 +222,11 @@ public:
         // av_log_set_level(AV_LOG_DEBUG);
 
         auto out = renderer.get().getOutput();
+
+        // The pipeline references the frame, so it must be gone before the
+        // frame is replaced.
+        encoder.reset();
+        frame.reset();
 
         // TODO: Fix Nvidia
 

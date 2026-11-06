@@ -440,8 +440,34 @@ Output createOutputImage(
 
 namespace alvr::render {
 
+namespace {
+    // Everything downstream of the eye copy is UNORM, see the constructor.
+    vk::Format unormOf(vk::Format format) {
+        if (format == vk::Format::eR8G8B8A8Srgb)
+            return vk::Format::eR8G8B8A8Unorm;
+        if (format == vk::Format::eB8G8R8A8Srgb)
+            return vk::Format::eB8G8R8A8Unorm;
+        return format;
+    }
+}
+
+bool Renderer::outputMatches(Output const& output, RendererCreateInfo const& createInfo) {
+    return output.image.image != VK_NULL_HANDLE
+        && output.imageCI.extent.width == createInfo.outputExtent.width
+        && output.imageCI.extent.height == createInfo.outputExtent.height
+        && output.imageCI.format == static_cast<VkFormat>(unormOf(createInfo.format));
+}
+
+Output Renderer::releaseOutput() {
+    outputReleased = true;
+    return output;
+}
+
 Renderer::Renderer(
-    VkContext const& vkCtx, RendererCreateInfo& createInfo, std::vector<PipelineCreateInfo> pipeCIs
+    VkContext const& vkCtx,
+    RendererCreateInfo& createInfo,
+    std::vector<PipelineCreateInfo> pipeCIs,
+    std::optional<Output> reuseOutput
 ) {
     eyeExtent = createInfo.inputEyeExtent;
     outExtent = createInfo.outputExtent;
@@ -452,12 +478,7 @@ Renderer::Renderer(
     // different memory layout (e.g. compression) than the exporter did.
     // MUTABLE_FORMAT is what makes the UNORM view of an sRGB image legal.
     vk::Format inputFormat = createInfo.format;
-    vk::Format unormFormat = createInfo.format;
-    if (inputFormat == vk::Format::eR8G8B8A8Srgb)
-        unormFormat = vk::Format::eR8G8B8A8Unorm;
-
-    if (inputFormat == vk::Format::eB8G8R8A8Srgb)
-        unormFormat = vk::Format::eB8G8R8A8Unorm;
+    vk::Format unormFormat = unormOf(inputFormat);
 
     // TODO: Only put the usage flags for the images that need to have them
     vk::ImageCreateInfo inputImgCI {
@@ -500,12 +521,24 @@ Renderer::Renderer(
 
     // VAAPI imports through DRM-PRIME and wants a dma-buf; NvEnc imports
     // through CUDA interop and wants an opaque fd.
-    output = createOutputImage(
-        vkCtx,
-        createInfo.outputExtent,
-        stagingImgCI.format,
-        vkCtx.meta.vendor == Vendor::Nvidia ? HandleType::OpaqueFd : HandleType::DmaBuf
-    );
+    //
+    // KiraVR: When layer 0 switches swap texture sets (game start, SteamVR
+    // scene vs game) only the inputs change. Reusing the output keeps the
+    // encoder, which wraps this image, alive instead of rebuilding VAAPI and
+    // forcing an IDR on every switch.
+    if (reuseOutput.has_value() && outputMatches(*reuseOutput, createInfo)) {
+        output = *reuseOutput;
+    } else {
+        if (reuseOutput.has_value()) {
+            reuseOutput->destroy(vkCtx);
+        }
+        output = createOutputImage(
+            vkCtx,
+            createInfo.outputExtent,
+            stagingImgCI.format,
+            vkCtx.meta.vendor == Vendor::Nvidia ? HandleType::OpaqueFd : HandleType::DmaBuf
+        );
+    }
 
     vk::QueryPoolCreateInfo poolCI {
         .queryType = vk::QueryType::eTimestamp,
@@ -815,7 +848,9 @@ void Renderer::destroy(VkContext const& ctx) {
     ctx.dev.destroy(cmdPool);
     ctx.dev.destroy(timestampPool);
 
-    output.destroy(ctx);
+    if (!outputReleased) {
+        output.destroy(ctx);
+    }
 
     for (auto& img : stagingImgs) {
         img.destroy(ctx);

@@ -639,7 +639,15 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
 
         try {
             enc.createImages(rendererCI);
-            enc.initEncoding();
+            if (enc.needsEncoderInit()) {
+                enc.initEncoding();
+            } else {
+                Info(
+                    "Layer 0 switched texture sets (%ux%u), kept the running encoder\n",
+                    desc.nWidth,
+                    desc.nHeight
+                );
+            }
         } catch (std::exception const& e) {
             Error(
                 "Could not set up the encoder: %s. Staying idle until the next client connect.\n",

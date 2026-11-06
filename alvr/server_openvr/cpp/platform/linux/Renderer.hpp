@@ -2,6 +2,7 @@
 
 #define VULKAN_HPP_NO_CONSTRUCTORS
 #include <cstddef>
+#include <optional>
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan.hpp>
 #include <vulkan/vulkan_core.h>
@@ -134,6 +135,7 @@ class Renderer {
     Image inputImages[ImageCount];
     Image stagingImgs[StagingImgCount];
     Output output;
+    bool outputReleased = false;
 
     vk::QueryPool timestampPool;
     vk::CommandPool cmdPool;
@@ -147,11 +149,22 @@ class Renderer {
     // vk::Semaphore renderFinishedSem;
 
 public:
+    // reuseOutput, when given, is adopted as the output image instead of
+    // allocating a new one. The caller must have checked outputMatches, so the
+    // encoder that wraps it can keep running across the rebuild.
     Renderer(
         VkContext const& vkCtx,
         RendererCreateInfo& createInfo,
-        std::vector<PipelineCreateInfo> pipeCIs
+        std::vector<PipelineCreateInfo> pipeCIs,
+        std::optional<Output> reuseOutput = std::nullopt
     );
+
+    // Whether an output image fits a renderer built from this create info.
+    // outputExtent must already include the foveation resize.
+    static bool outputMatches(Output const& output, RendererCreateInfo const& createInfo);
+
+    // Hands the output image to the caller so destroy() leaves it alone.
+    Output releaseOutput();
 
     // TODO: Import output (somehow?)
 

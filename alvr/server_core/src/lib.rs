@@ -114,6 +114,11 @@ pub struct ConnectionContext {
     video_recording_file: Mutex<Option<File>>,
     connection_threads: Mutex<Vec<JoinHandle<()>>>,
     clients_to_be_removed: Mutex<HashSet<String>>,
+    // KiraVR: Hostnames with a running connection thread. Without this a
+    // client left in a busy state (Connecting, Disconnecting) with no thread to
+    // finish it stayed stuck until restart. Lock order everywhere:
+    // SESSION_MANAGER, then active_clients, then clients_to_be_removed.
+    active_clients: Mutex<HashSet<String>>,
     video_channel_sender: Mutex<Option<SyncSender<VideoPacket>>>,
     haptics_sender: Mutex<Option<StreamSender<Haptics>>>,
 }
@@ -232,6 +237,7 @@ impl ServerCoreContext {
             video_recording_file: Mutex::new(None),
             connection_threads: Mutex::new(Vec::new()),
             clients_to_be_removed: Mutex::new(HashSet::new()),
+            active_clients: Mutex::new(HashSet::new()),
             video_channel_sender: Mutex::new(None),
             haptics_sender: Mutex::new(None),
         });
@@ -542,6 +548,12 @@ impl ServerCoreContext {
     }
 }
 
+// SteamVR aborts vrserver when a driver's shutdown takes about 10 s, counts it
+// as a crash and blocks the driver on the next start (safe mode). Keep the
+// whole shutdown well below that.
+const SHUTDOWN_CLIENTS_TIMEOUT: Duration = Duration::from_secs(2);
+const SHUTDOWN_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+
 impl Drop for ServerCoreContext {
     fn drop(&mut self) {
         dbg_server_core!("Drop");
@@ -575,7 +587,15 @@ impl Drop for ServerCoreContext {
 
         dbg_server_core!("Joining connection thread");
         if let Some(thread) = self.connection_thread.write().take() {
-            thread.join().ok();
+            let deadline = std::time::Instant::now() + SHUTDOWN_HANDSHAKE_TIMEOUT;
+            while !thread.is_finished() && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            if thread.is_finished() {
+                thread.join().ok();
+            } else {
+                warn!("The connection thread did not stop in time, shutting down without it");
+            }
         }
 
         // apply openvr config for the next launch
@@ -594,13 +614,34 @@ impl Drop for ServerCoreContext {
             session.restart_settings_hash = new_hash;
         }
 
-        // todo: check if this is still needed
-        while SESSION_MANAGER
-            .read()
-            .client_list()
-            .iter()
-            .any(|(_, info)| info.connection_state != ConnectionState::Disconnected)
-        {
+        // KiraVR: Wait for the connection threads to settle their clients, but
+        // settle clients without a thread right away and never wait forever.
+        // Before, a client marked Disconnecting above with no thread behind it
+        // (like the wired entry while streaming wirelessly) never reached
+        // Disconnected: SteamVR hung on exit and "Disconnecting" stayed in the
+        // saved session, which the dashboard then showed.
+        let deadline = std::time::Instant::now() + SHUTDOWN_CLIENTS_TIMEOUT;
+        loop {
+            connection::heal_stale_connection_states(&self.connection_context);
+            if SESSION_MANAGER
+                .read()
+                .client_list()
+                .iter()
+                .all(|(_, info)| info.connection_state == ConnectionState::Disconnected)
+            {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                warn!("Clients did not disconnect in time, marking them disconnected");
+                let mut session_manager = SESSION_MANAGER.write();
+                for hostname in session_manager.client_hostnames() {
+                    session_manager.update_client_connections(
+                        hostname,
+                        ClientConnectionsAction::SetConnectionState(ConnectionState::Disconnected),
+                    );
+                }
+                break;
+            }
             thread::sleep(Duration::from_millis(100));
         }
 

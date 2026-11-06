@@ -118,6 +118,55 @@ pub struct StreamConfigPacket {
     pub negotiated: ClientNegotiatedStreamingConfig,
 }
 
+// KiraVR: Version-independent views of the two handshake packets. Each holds
+// only the first field, which has the same type in every version, and bincode
+// ignores the bytes after it. That lets each side read just enough of a peer
+// on another version to explain the mismatch instead of failing silently.
+// Field order of ConnectionAcceptedInfo, ClientConnectionResult and
+// StreamConfigPacket must keep these first fields first.
+
+#[derive(Serialize, Deserialize)]
+pub struct ConnectionAcceptedHead {
+    pub client_protocol_id: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum ClientConnectionResultHead {
+    ConnectionAccepted(ConnectionAcceptedHead),
+    ClientStandby,
+}
+
+// Sent instead of StreamConfigPacket when the client is incompatible. Same
+// leading field, so any client decoding a StreamConfigHead can read it.
+#[derive(Serialize, Deserialize)]
+pub struct StreamConfigHead {
+    pub session: String,
+}
+
+pub const INCOMPATIBLE_NOTICE_KEY: &str = "kiravr_incompatible";
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct IncompatibleNotice {
+    pub server_version: String,
+    pub server_protocol: String,
+    // Written by the server, which knows both versions. Shown on the headset.
+    pub message: String,
+}
+
+impl IncompatibleNotice {
+    pub fn to_head(&self) -> Result<StreamConfigHead> {
+        Ok(StreamConfigHead {
+            session: json::to_string(&json::json!({ INCOMPATIBLE_NOTICE_KEY: self }))?,
+        })
+    }
+
+    // None when the session JSON is a normal session.
+    pub fn from_head(head: &StreamConfigHead) -> Option<Self> {
+        let value = json::from_str::<json::Value>(&head.session).ok()?;
+        json::from_value(value.get(INCOMPATIBLE_NOTICE_KEY)?.clone()).ok()
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ClientStreamConfig {
     pub server_version: Version,

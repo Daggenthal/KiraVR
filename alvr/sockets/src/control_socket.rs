@@ -1,5 +1,5 @@
 use crate::{CONTROL_PORT, LOCAL_IP};
-use alvr_common::{ConResult, HandleTryAgain, ToCon, anyhow::Result, con_bail};
+use alvr_common::{AnyhowToCon, ConResult, HandleTryAgain, ToCon, anyhow::Result, con_bail};
 use alvr_session::{DscpTos, SocketBufferConfig};
 use bincode::config;
 use serde::{Serialize, de::DeserializeOwned};
@@ -105,6 +105,26 @@ fn framed_recv<R: DeserializeOwned>(
     recv_cursor: &mut Option<usize>,
     timeout: Duration,
 ) -> ConResult<R> {
+    framed_recv_bytes(socket, buffer, recv_cursor, timeout)?;
+    decode(&buffer[FRAMED_PREFIX_LENGTH..]).to_con()
+}
+
+// KiraVR: Decodes a packet payload. Trailing bytes are ignored, so a struct
+// holding only the leading fields of a packet reads it even when later fields
+// differ between versions. Used to understand a peer of another version just
+// enough to tell the user what is wrong.
+pub fn decode<R: DeserializeOwned>(bytes: &[u8]) -> Result<R> {
+    let (packet, _) = bincode::serde::decode_from_slice(bytes, config::standard())?;
+    Ok(packet)
+}
+
+// Reads one whole frame into buffer (prefix included).
+fn framed_recv_bytes(
+    socket: &mut TcpStream,
+    buffer: &mut Vec<u8>,
+    recv_cursor: &mut Option<usize>,
+    timeout: Duration,
+) -> ConResult {
     let deadline = Instant::now() + timeout;
 
     let recv_cursor_ref = if let Some(cursor) = recv_cursor {
@@ -116,6 +136,9 @@ fn framed_recv<R: DeserializeOwned>(
             let count = socket.peek(&mut payload_size_bytes).handle_try_again()?;
             if count == FRAMED_PREFIX_LENGTH {
                 break;
+            } else if count == 0 {
+                // KiraVR: End of stream, see MultiplexedTcpReader::recv.
+                con_bail!("Connection closed by the peer");
             } else if Instant::now() > deadline {
                 return alvr_common::try_again();
             }
@@ -139,13 +162,9 @@ fn framed_recv<R: DeserializeOwned>(
         }
     }
 
-    let (packet, _) =
-        bincode::serde::decode_from_slice(&buffer[FRAMED_PREFIX_LENGTH..], config::standard())
-            .to_con()?;
-
     *recv_cursor = None;
 
-    Ok(packet)
+    Ok(())
 }
 
 pub struct ControlSocketSender<T> {
@@ -217,6 +236,13 @@ impl ProtoControlSocket {
         framed_recv(&mut self.inner, &mut vec![], &mut None, timeout)
     }
 
+    // One packet as raw payload bytes, decode it with decode().
+    pub fn recv_raw(&mut self, timeout: Duration) -> ConResult<Vec<u8>> {
+        let mut buffer = vec![];
+        framed_recv_bytes(&mut self.inner, &mut buffer, &mut None, timeout)?;
+        Ok(buffer.split_off(FRAMED_PREFIX_LENGTH))
+    }
+
     pub fn split<S: Serialize, R: DeserializeOwned>(
         self,
         timeout: Duration,
@@ -236,5 +262,61 @@ impl ProtoControlSocket {
                 _phantom: PhantomData,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alvr_packets::{
+        ClientConnectionResult, ClientConnectionResultHead, ConnectionAcceptedInfo,
+        IncompatibleNotice, StreamConfigHead,
+    };
+
+    fn encode<S: Serialize>(packet: &S) -> Vec<u8> {
+        bincode::serde::encode_to_vec(packet, config::standard()).unwrap()
+    }
+
+    // The server must read the protocol ID from a full client packet through
+    // the head, which is what makes mismatches explainable.
+    #[test]
+    fn head_reads_full_connection_result() {
+        let full = ClientConnectionResult::ConnectionAccepted(Box::new(ConnectionAcceptedInfo {
+            client_protocol_id: 0xdead_beef_1234_5678,
+            platform_string: "Quest 3".into(),
+            server_ip: "192.168.1.131".parse().unwrap(),
+            streaming_capabilities: None,
+        }));
+        match decode::<ClientConnectionResultHead>(&encode(&full)).unwrap() {
+            ClientConnectionResultHead::ConnectionAccepted(head) => {
+                assert_eq!(head.client_protocol_id, 0xdead_beef_1234_5678)
+            }
+            ClientConnectionResultHead::ClientStandby => panic!("wrong variant"),
+        }
+
+        let standby = encode(&ClientConnectionResult::ClientStandby);
+        assert!(matches!(
+            decode::<ClientConnectionResultHead>(&standby).unwrap(),
+            ClientConnectionResultHead::ClientStandby
+        ));
+    }
+
+    #[test]
+    fn notice_round_trips_and_normal_sessions_are_not_notices() {
+        let notice = IncompatibleNotice {
+            server_version: "21.0.0-dev15".into(),
+            server_protocol: "21-dev15".into(),
+            message: "This KiraVR app is older.".into(),
+        };
+        let bytes = encode(&notice.to_head().unwrap());
+        let head = decode::<StreamConfigHead>(&bytes).unwrap();
+        let read = IncompatibleNotice::from_head(&head).unwrap();
+        assert_eq!(read.message, "This KiraVR app is older.");
+        assert_eq!(read.server_protocol, "21-dev15");
+
+        let normal = StreamConfigHead {
+            session: r#"{"server_version":"21.0.0-dev14"}"#.into(),
+        };
+        assert!(IncompatibleNotice::from_head(&normal).is_none());
     }
 }

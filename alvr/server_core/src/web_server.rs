@@ -189,9 +189,13 @@ async fn update_client_connections(
     Json((hostname, mut action)): Json<(String, ClientConnectionsAction)>,
 ) {
     let mut session_manager = SESSION_MANAGER.write();
+    // KiraVR: Only defer the removal when a connection thread will actually
+    // finish it. Otherwise remove right away, or the entry sat in
+    // "Disconnecting" forever.
     if matches!(action, ClientConnectionsAction::RemoveEntry)
         && let Some(entry) = session_manager.client_list().get(&hostname)
         && entry.connection_state != ConnectionState::Disconnected
+        && ctx.active_clients.lock().contains(&hostname)
     {
         ctx.clients_to_be_removed.lock().insert(hostname.clone());
 

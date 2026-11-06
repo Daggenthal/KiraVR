@@ -24,6 +24,12 @@ pub const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MDNS_SERVICE_TYPE: &str = "_alvr._tcp.local.";
 pub const MDNS_PROTOCOL_KEY: &str = "protocol";
 pub const MDNS_DEVICE_ID_KEY: &str = "device_id";
+// KiraVR: Extra announce keys, ignored by servers that do not know them. The
+// full version and the app name let a mismatch message say exactly what to
+// update.
+pub const MDNS_VERSION_KEY: &str = "version";
+pub const MDNS_APP_KEY: &str = "app";
+pub const MDNS_APP_KIRAVR: &str = "kiravr";
 
 pub const WIRED_CLIENT_HOSTNAME: &str = "client.wired";
 
@@ -106,6 +112,20 @@ pub fn connect_to_client<T: DeserializeOwned>(
     let res = control_socket.recv(timeout)?;
 
     Ok((control_socket, client_ip, res))
+}
+
+// Like connect_to_client, but returns the first packet undecoded so the caller
+// can read a version-independent prefix before decoding the whole thing.
+pub fn connect_to_client_raw(
+    client_ips: Vec<IpAddr>,
+    timeout: Duration,
+) -> ConResult<(ProtoControlSocket, IpAddr, Vec<u8>)> {
+    let (mut control_socket, client_ip) =
+        ProtoControlSocket::connect_to(timeout, PeerType::AnyClient(client_ips))?;
+
+    let bytes = control_socket.recv_raw(timeout)?;
+
+    Ok((control_socket, client_ip, bytes))
 }
 
 pub fn listen_to_server<T: DeserializeOwned>(

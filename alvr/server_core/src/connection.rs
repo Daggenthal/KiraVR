@@ -20,10 +20,10 @@ use alvr_common::{
 };
 use alvr_events::{AdbEvent, ButtonEvent, EventType};
 use alvr_packets::{
-    AUDIO, ClientConnectionResult, ClientConnectionsAction, ClientControlPacket,
-    ClientNegotiatedStreamingConfig, ClientStatistics, HAPTICS, NegotiatedStreamingConfigExt,
-    RealTimeConfig, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
-    VIDEO, VideoPacketHeader,
+    AUDIO, ClientConnectionResult, ClientConnectionResultHead, ClientConnectionsAction,
+    ClientControlPacket, ClientNegotiatedStreamingConfig, ClientStatistics, HAPTICS,
+    IncompatibleNotice, NegotiatedStreamingConfigExt, RealTimeConfig, STATISTICS,
+    ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData, VIDEO, VideoPacketHeader,
 };
 use alvr_session::{
     BodyTrackingSinkConfig, CodecType, ControllersEmulationMode, FrameSize, H264Profile, Settings,
@@ -44,6 +44,7 @@ use std::{
 };
 
 const RETRY_CONNECT_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const STREAM_THREADS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 pub const STREAMING_RECV_TIMEOUT: Duration = Duration::from_millis(500);
 const REAL_TIME_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
@@ -301,6 +302,8 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
     let mut wired_connection = None;
 
     while *lifecycle_state.read() != LifecycleState::ShuttingDown {
+        heal_stale_connection_states(&ctx);
+
         dbg_connection!("handshake_loop: Try connect to wired device");
 
         let mut wired_client_ips = HashMap::new();
@@ -503,6 +506,86 @@ pub fn handshake_loop(ctx: Arc<ConnectionContext>, lifecycle_state: Arc<RwLock<L
     alvr_common::dbg_connection!("handshake_loop: End");
 }
 
+// KiraVR: A client shown as busy (Connecting, Streaming, Disconnecting) with no
+// connection thread behind it can never change state on its own, which left
+// the wired toggle stuck on "Disconnecting". Settle it: Removed if a removal
+// was requested, otherwise Disconnected so discovery picks it up again.
+pub(crate) fn heal_stale_connection_states(ctx: &ConnectionContext) {
+    let mut session_manager = SESSION_MANAGER.write();
+    let active = ctx.active_clients.lock();
+    let stale = session_manager
+        .client_list()
+        .iter()
+        .filter(|(hostname, info)| {
+            info.connection_state != ConnectionState::Disconnected && !active.contains(*hostname)
+        })
+        .map(|(hostname, info)| (hostname.clone(), info.connection_state.clone()))
+        .collect::<Vec<_>>();
+    drop(active);
+
+    for (hostname, state) in stale {
+        let remove = ctx.clients_to_be_removed.lock().remove(&hostname);
+        warn!(
+            "Client {hostname} was stuck in {state:?} with no connection, {}",
+            if remove {
+                "removing it"
+            } else {
+                "resetting it"
+            }
+        );
+        let action = if remove {
+            ClientConnectionsAction::RemoveEntry
+        } else {
+            ClientConnectionsAction::SetConnectionState(ConnectionState::Disconnected)
+        };
+        session_manager.update_client_connections(hostname, action);
+    }
+}
+
+// Joins a stream thread unless it is still running at `deadline`, in which
+// case it is named in the log and left behind.
+fn join_until<T>(name: &str, thread: thread::JoinHandle<T>, deadline: Instant) {
+    while !thread.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if thread.is_finished() {
+        thread.join().ok();
+    } else {
+        error!(
+            "Stream thread \"{name}\" did not stop within {STREAM_THREADS_SHUTDOWN_TIMEOUT:?}, \
+            continuing without it"
+        );
+    }
+}
+
+fn reject_incompatible_client(socket: &mut ProtoControlSocket, hostname: &str) {
+    let announce = crate::sockets::CLIENT_ANNOUNCES
+        .lock()
+        .get(hostname)
+        .cloned();
+    let Some(mismatch) =
+        crate::sockets::describe_mismatch(hostname, announce.as_ref()).or_else(|| {
+            // The announce matched but the hash did not, e.g. a stale announce.
+            crate::sockets::describe_mismatch(hostname, None)
+        })
+    else {
+        return;
+    };
+    crate::sockets::report_mismatch(hostname, announce.as_ref(), &mismatch);
+
+    let notice = IncompatibleNotice {
+        server_version: alvr_common::ALVR_VERSION.to_string(),
+        server_protocol: alvr_common::protocol_id(),
+        message: mismatch.headset_message,
+    };
+    match notice.to_head() {
+        Ok(head) => {
+            socket.send(&head).ok();
+        }
+        Err(e) => warn!("Could not build the incompatibility notice: {e}"),
+    }
+}
+
 fn try_connect(
     ctx: Arc<ConnectionContext>,
     lifecycle_state: Arc<RwLock<LifecycleState>>,
@@ -510,7 +593,7 @@ fn try_connect(
 ) -> ConResult {
     dbg_connection!("try_connect: Finding client and creating control socket");
 
-    let (socket, client_ip, connection_result) = alvr_sockets::connect_to_client(
+    let (mut socket, client_ip, first_packet) = alvr_sockets::connect_to_client_raw(
         client_ips.keys().cloned().collect(),
         Duration::from_secs(1),
     )?;
@@ -519,8 +602,22 @@ fn try_connect(
         con_bail!("unreachable");
     };
 
+    // KiraVR: Check the protocol from the version-independent head before
+    // decoding the rest, which fails when the layouts differ. On a mismatch,
+    // tell the headset why instead of dropping it silently.
+    if let Ok(ClientConnectionResultHead::ConnectionAccepted(head)) =
+        alvr_sockets::decode::<ClientConnectionResultHead>(&first_packet)
+        && head.client_protocol_id != alvr_common::protocol_id_u64()
+    {
+        reject_incompatible_client(&mut socket, &client_hostname);
+        return Ok(());
+    }
+    let connection_result =
+        alvr_sockets::decode::<ClientConnectionResult>(&first_packet).to_con()?;
+
     dbg_connection!("try_connect: Pushing new client connection thread");
 
+    ctx.active_clients.lock().insert(client_hostname.clone());
     ctx.connection_threads.lock().push(thread::spawn({
         let ctx = Arc::clone(&ctx);
         move || {
@@ -535,18 +632,17 @@ fn try_connect(
                 error!("Handshake error for {client_hostname}: {e}");
             }
 
-            let mut clients_to_be_removed = ctx.clients_to_be_removed.lock();
-
-            let action = if clients_to_be_removed.contains(&client_hostname) {
-                clients_to_be_removed.remove(&client_hostname);
-
+            // KiraVR: Session first, then the sets. This used to hold
+            // clients_to_be_removed while waiting for SESSION_MANAGER, the
+            // reverse of the web server's order, which could deadlock both.
+            let mut session_manager = SESSION_MANAGER.write();
+            ctx.active_clients.lock().remove(&client_hostname);
+            let action = if ctx.clients_to_be_removed.lock().remove(&client_hostname) {
                 ClientConnectionsAction::RemoveEntry
             } else {
                 ClientConnectionsAction::SetConnectionState(ConnectionState::Disconnected)
             };
-            SESSION_MANAGER
-                .write()
-                .update_client_connections(client_hostname, action);
+            session_manager.update_client_connections(client_hostname, action);
         }
     }));
 
@@ -1506,17 +1602,23 @@ fn connection_pipeline(
     drop(session_manager_lock);
 
     // Ensure shutdown of threads
+    // KiraVR: Bounded. One stream thread that never returned (seen after a
+    // wired timeout) kept this client in "Disconnecting" forever, and wired
+    // only reconnects from "Disconnected", so the headset waited on "The
+    // stream will begin soon" until SteamVR was restarted. Name what is stuck
+    // so it can be fixed at the source, then carry on without it.
     dbg_connection!("connection_pipeline: Shutdown threads");
-    video_send_thread.join().ok();
-    game_audio_thread.join().ok();
-    microphone_thread.join().ok();
-    tracking_receive_thread.join().ok();
-    statistics_thread.join().ok();
-    real_time_update_thread.join().ok();
-    control_receive_thread.join().ok();
-    stream_receive_thread.join().ok();
-    keepalive_thread.join().ok();
-    lifecycle_check_thread.join().ok();
+    let deadline = Instant::now() + STREAM_THREADS_SHUTDOWN_TIMEOUT;
+    join_until("video send", video_send_thread, deadline);
+    join_until("game audio", game_audio_thread, deadline);
+    join_until("microphone", microphone_thread, deadline);
+    join_until("tracking receive", tracking_receive_thread, deadline);
+    join_until("statistics", statistics_thread, deadline);
+    join_until("real time update", real_time_update_thread, deadline);
+    join_until("control receive", control_receive_thread, deadline);
+    join_until("stream receive", stream_receive_thread, deadline);
+    join_until("keepalive", keepalive_thread, deadline);
+    join_until("lifecycle check", lifecycle_check_thread, deadline);
 
     ctx.events_sender
         .send(ServerCoreEvent::ClientDisconnected)

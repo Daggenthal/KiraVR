@@ -9,14 +9,15 @@ use crate::{
 };
 use alvr_common::{
     ALVR_VERSION, AnyhowToCon, ConResult, ConnectionError, ConnectionState, LifecycleState,
-    dbg_connection, debug, error, info,
+    con_bail, dbg_connection, debug, error, info,
     parking_lot::{Condvar, Mutex, RwLock},
     wait_rwlock, warn,
 };
 use alvr_packets::{
     AUDIO, ClientConnectionResult, ClientControlPacket, ClientStatistics, ConnectionAcceptedInfo,
-    HAPTICS, Haptics, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
-    VIDEO, VideoPacketHeader, VideoStreamingCapabilities, VideoStreamingCapabilitiesExt,
+    HAPTICS, Haptics, IncompatibleNotice, STATISTICS, ServerControlPacket, StreamConfigHead,
+    StreamConfigPacket, TRACKING, TrackingData, VIDEO, VideoPacketHeader,
+    VideoStreamingCapabilities, VideoStreamingCapabilitiesExt,
 };
 use alvr_session::{SocketProtocol, settings_schema::Switch};
 use alvr_sockets::{
@@ -188,8 +189,20 @@ fn connection_pipeline(
             },
         )))
         .to_con()?;
-    let config_packet =
-        proto_control_socket.recv::<StreamConfigPacket>(HANDSHAKE_ACTION_TIMEOUT)?;
+    // KiraVR: An incompatible server answers with a notice in place of the
+    // stream config. Read the version-independent head first so its message
+    // reaches the HUD instead of a decode error.
+    let config_bytes = proto_control_socket.recv_raw(HANDSHAKE_ACTION_TIMEOUT)?;
+    if let Ok(head) = alvr_sockets::decode::<StreamConfigHead>(&config_bytes)
+        && let Some(notice) = IncompatibleNotice::from_head(&head)
+    {
+        warn!(
+            "Streamer v{} (protocol {}) is incompatible: {}",
+            notice.server_version, notice.server_protocol, notice.message
+        );
+        con_bail!("{}", notice.message);
+    }
+    let config_packet = alvr_sockets::decode::<StreamConfigPacket>(&config_bytes).to_con()?;
     dbg_connection!("connection_pipeline: stream config received");
 
     let stream_config = config_packet.to_stream_config().to_con()?;

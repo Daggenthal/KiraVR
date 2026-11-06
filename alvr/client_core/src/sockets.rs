@@ -28,10 +28,17 @@ impl AnnouncerSocket {
             &self.hostname,
             local_ip,
             5353,
-            &[(
-                alvr_sockets::MDNS_PROTOCOL_KEY,
-                alvr_common::protocol_id().as_str(),
-            )][..],
+            &[
+                (
+                    alvr_sockets::MDNS_PROTOCOL_KEY,
+                    alvr_common::protocol_id().as_str(),
+                ),
+                (
+                    alvr_sockets::MDNS_VERSION_KEY,
+                    alvr_common::ALVR_VERSION.to_string().as_str(),
+                ),
+                (alvr_sockets::MDNS_APP_KEY, alvr_sockets::MDNS_APP_KIRAVR),
+            ][..],
         )?)?;
 
         Ok(())

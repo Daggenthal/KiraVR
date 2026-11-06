@@ -22,7 +22,8 @@ pub fn targz(sh: &Shell, source: &Path) -> Result<(), xshell::Error> {
 }
 
 pub fn download(sh: &Shell, url: &str, destination: &Path) -> Result<(), xshell::Error> {
-    cmd!(sh, "curl -L -o {destination} --url {url}").run()
+    // KiraVR: --fail so an HTTP error page is not saved and unpacked as the download
+    cmd!(sh, "curl -L --fail -o {destination} --url {url}").run()
 }
 
 pub fn download_and_extract_zip(url: &str, destination: &Path) -> Result<(), xshell::Error> {

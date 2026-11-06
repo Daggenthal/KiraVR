@@ -26,12 +26,10 @@ use wgpu::{
     TextureSampleType, TextureViewDimension, VertexState, include_wgsl,
 };
 
-const TEXTURE_WIDTH: u32 = 640;
-const TEXTURE_HEIGHT: u32 = 720;
-const FONT_SIZE: f32 = 34.0;
-const LINE_HEIGHT: f32 = 42.0;
-const PADDING: f32 = 18.0;
-const BACKGROUND: [u8; 4] = [10, 10, 14, 175];
+const TEXTURE_WIDTH: u32 = 1120;
+const TEXTURE_HEIGHT: u32 = 760;
+const PADDING: f32 = 24.0;
+const BACKGROUND: [u8; 4] = [12, 13, 18, 190];
 const TRANSFORM_SIZE: u32 = mem::size_of::<Mat4>() as u32;
 // WGSL layout of the shader's PushConstant: transform at 0, opacity at 64,
 // tint (a vec4, aligned to 16) at 80, 96 bytes in all. The range must cover
@@ -75,18 +73,64 @@ pub enum OverlayAnchor {
     World { pose: Pose },
 }
 
+// What one column of the panel holds, top to bottom.
 #[derive(Clone, Debug, PartialEq)]
-pub struct OverlayLine {
-    pub text: String,
-    pub color: [u8; 3],
+pub enum OverlayItem {
+    // A section title.
+    Header(String),
+    // A label on the left and its value right-aligned.
+    Row {
+        label: String,
+        value: String,
+        color: [u8; 3],
+    },
+    // A line of text across the column.
+    Text {
+        text: String,
+        color: [u8; 3],
+    },
+    // A filled bar, 0 to 1, like a battery gauge.
+    Bar {
+        fraction: f32,
+        color: [u8; 3],
+    },
+    // A thin separator between sections.
+    Divider,
 }
 
-impl OverlayLine {
-    pub fn new(text: impl Into<String>, color: [u8; 3]) -> Self {
-        Self {
+impl OverlayItem {
+    pub fn header(text: impl Into<String>) -> Self {
+        Self::Header(text.into())
+    }
+
+    pub fn row(label: impl Into<String>, value: impl Into<String>, color: [u8; 3]) -> Self {
+        Self::Row {
+            label: label.into(),
+            value: value.into(),
+            color,
+        }
+    }
+
+    pub fn text(text: impl Into<String>, color: [u8; 3]) -> Self {
+        Self::Text {
             text: text.into(),
             color,
         }
+    }
+}
+
+// The panel: Two columns side by side and an optional line across the
+// bottom, for hints.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverlayLayout {
+    pub left: Vec<OverlayItem>,
+    pub right: Vec<OverlayItem>,
+    pub footer: Option<(String, [u8; 3])>,
+}
+
+impl OverlayLayout {
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty() && self.right.is_empty() && self.footer.is_none()
     }
 }
 
@@ -264,8 +308,8 @@ impl OverlayRenderer {
 
     // Rasterizes the lines into the panel texture. Call it when the text
     // changes (a couple of times per second), not every frame.
-    pub fn update(&self, lines: &[OverlayLine]) {
-        let (buffer, used_height) = rasterize(&self.font, lines);
+    pub fn update(&self, layout: &OverlayLayout) {
+        let (buffer, used_height) = rasterize(&self.font, layout);
         self.used_fraction
             .set(used_height as f32 / TEXTURE_HEIGHT as f32);
 
@@ -361,93 +405,289 @@ impl OverlayRenderer {
     }
 }
 
-// Returns the RGBA texture and how many rows from the top the panel uses.
-fn rasterize(font: &FontRef, lines: &[OverlayLine]) -> (Vec<u8>, u32) {
-    let (width, height) = (TEXTURE_WIDTH as usize, TEXTURE_HEIGHT as usize);
-    let mut buffer = vec![0u8; width * height * 4];
-    if lines.is_empty() {
-        return (buffer, 0);
-    }
+const HEADER_SIZE: f32 = 33.0;
+const ROW_SIZE: f32 = 29.0;
+const HEADER_HEIGHT: f32 = 46.0;
+const ROW_HEIGHT: f32 = 37.0;
+const DIVIDER_HEIGHT: f32 = 18.0;
+const BAR_HEIGHT: f32 = 34.0;
+const COLUMN_GAP: f32 = 44.0;
+const HEADER_COLOR: [u8; 3] = [245, 245, 250];
+const LABEL_COLOR: [u8; 3] = [150, 156, 168];
+const LINE_COLOR: [u8; 4] = [255, 255, 255, 40];
+const BAR_TRACK: [u8; 4] = [255, 255, 255, 36];
 
-    let used_height =
-        ((PADDING * 2.0 + LINE_HEIGHT * lines.len() as f32).ceil() as usize).min(height);
-    for pixel in buffer[..used_height * width * 4].chunks_exact_mut(4) {
-        pixel.copy_from_slice(&BACKGROUND);
+fn item_height(item: &OverlayItem) -> f32 {
+    match item {
+        OverlayItem::Header(_) => HEADER_HEIGHT,
+        OverlayItem::Row { .. } | OverlayItem::Text { .. } => ROW_HEIGHT,
+        OverlayItem::Bar { .. } => BAR_HEIGHT,
+        OverlayItem::Divider => DIVIDER_HEIGHT,
     }
+}
 
-    let scaled = font.as_scaled(FONT_SIZE);
-    for (index, line) in lines.iter().enumerate() {
-        let top = PADDING + LINE_HEIGHT * index as f32;
-        if top + LINE_HEIGHT > height as f32 {
-            break;
+struct Canvas {
+    buffer: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
+impl Canvas {
+    fn fill(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, color: [u8; 4]) {
+        let (x0, x1) = (x0.max(0.0) as usize, (x1 as usize).min(self.width));
+        let (y0, y1) = (y0.max(0.0) as usize, (y1 as usize).min(self.height));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                self.blend(
+                    x,
+                    y,
+                    [color[0], color[1], color[2]],
+                    color[3] as f32 / 255.0,
+                );
+            }
         }
+    }
+
+    // Straight alpha "over" onto what is already there.
+    fn blend(&mut self, x: usize, y: usize, color: [u8; 3], alpha: f32) {
+        let at = (y * self.width + x) * 4;
+        let pixel = &mut self.buffer[at..at + 4];
+        let dst_a = pixel[3] as f32 / 255.0;
+        let out_a = alpha + dst_a * (1.0 - alpha);
+        if out_a <= 0.0 {
+            return;
+        }
+        for c in 0..3 {
+            let src = color[c] as f32 * alpha;
+            let dst = pixel[c] as f32 * dst_a * (1.0 - alpha);
+            pixel[c] = ((src + dst) / out_a) as u8;
+        }
+        pixel[3] = (out_a * 255.0) as u8;
+    }
+
+    fn text(
+        &mut self,
+        font: &FontRef,
+        text: &str,
+        size: f32,
+        x: f32,
+        y: f32,
+        right_aligned: bool,
+        color: [u8; 3],
+    ) {
         let glyphs = Layout::default_single_line()
-            .h_align(HorizontalAlign::Left)
+            .h_align(if right_aligned {
+                HorizontalAlign::Right
+            } else {
+                HorizontalAlign::Left
+            })
             .v_align(VerticalAlign::Top)
             .calculate_glyphs(
                 &[font],
                 &SectionGeometry {
-                    screen_position: (PADDING, top),
+                    screen_position: (x, y),
                     ..Default::default()
                 },
                 &[SectionText {
-                    text: &line.text,
-                    scale: FONT_SIZE.into(),
+                    text,
+                    scale: size.into(),
                     font_id: FontId(0),
                 }],
             );
-
+        let scaled = font.as_scaled(size);
         for glyph in glyphs {
             let Some(outlined) = scaled.outline_glyph(glyph.glyph) else {
                 continue;
             };
             let bounds = outlined.px_bounds();
-            outlined.draw(|x, y, coverage| {
-                let x = x as i32 + bounds.min.x as i32;
-                let y = y as i32 + bounds.min.y as i32;
-                if x < 0 || y < 0 || x >= width as i32 || y >= used_height as i32 {
-                    return;
+            outlined.draw(|gx, gy, coverage| {
+                let px = gx as i32 + bounds.min.x as i32;
+                let py = gy as i32 + bounds.min.y as i32;
+                if px >= 0 && py >= 0 && (px as usize) < self.width && (py as usize) < self.height {
+                    self.blend(px as usize, py as usize, color, coverage);
                 }
-                let at = (y as usize * width + x as usize) * 4;
-                let pixel = &mut buffer[at..at + 4];
-                // Blend the glyph over the panel background.
-                for c in 0..3 {
-                    pixel[c] = (pixel[c] as f32 * (1.0 - coverage)
-                        + line.color[c] as f32 * coverage) as u8;
-                }
-                pixel[3] = pixel[3].max((coverage * 255.0) as u8);
             });
         }
     }
+}
 
-    (buffer, used_height as u32)
+// Returns the RGBA texture and how many rows from the top the panel uses.
+fn rasterize(font: &FontRef, layout: &OverlayLayout) -> (Vec<u8>, u32) {
+    let (width, height) = (TEXTURE_WIDTH as usize, TEXTURE_HEIGHT as usize);
+    let mut canvas = Canvas {
+        buffer: vec![0u8; width * height * 4],
+        width,
+        height,
+    };
+    if layout.is_empty() {
+        return (canvas.buffer, 0);
+    }
+
+    let column_height = |items: &[OverlayItem]| items.iter().map(item_height).sum::<f32>();
+    let content = column_height(&layout.left).max(column_height(&layout.right));
+    let footer = if layout.footer.is_some() {
+        DIVIDER_HEIGHT + ROW_HEIGHT
+    } else {
+        0.0
+    };
+    let used = ((PADDING * 2.0 + content + footer).ceil() as usize).min(height);
+
+    // Panel with a faint border.
+    canvas.fill(0.0, 0.0, width as f32, used as f32, BACKGROUND);
+    canvas.fill(0.0, 0.0, width as f32, 2.0, LINE_COLOR);
+    canvas.fill(
+        0.0,
+        used as f32 - 2.0,
+        width as f32,
+        used as f32,
+        LINE_COLOR,
+    );
+
+    let has_right = !layout.right.is_empty();
+    let column_width = if has_right {
+        (width as f32 - PADDING * 2.0 - COLUMN_GAP) / 2.0
+    } else {
+        width as f32 - PADDING * 2.0
+    };
+    let columns = [
+        (PADDING, &layout.left),
+        (PADDING + column_width + COLUMN_GAP, &layout.right),
+    ];
+    for (x0, items) in columns {
+        let x1 = x0 + column_width;
+        let mut y = PADDING;
+        for item in items.iter() {
+            match item {
+                OverlayItem::Header(text) => {
+                    canvas.text(font, text, HEADER_SIZE, x0, y + 2.0, false, HEADER_COLOR);
+                }
+                OverlayItem::Row {
+                    label,
+                    value,
+                    color,
+                } => {
+                    canvas.text(font, label, ROW_SIZE, x0, y + 4.0, false, LABEL_COLOR);
+                    canvas.text(font, value, ROW_SIZE, x1, y + 4.0, true, *color);
+                }
+                OverlayItem::Text { text, color } => {
+                    canvas.text(font, text, ROW_SIZE, x0, y + 4.0, false, *color);
+                }
+                OverlayItem::Bar { fraction, color } => {
+                    let (top, bottom) = (y + 8.0, y + BAR_HEIGHT - 8.0);
+                    canvas.fill(x0, top, x1, bottom, BAR_TRACK);
+                    let filled = x0 + (x1 - x0) * fraction.clamp(0.0, 1.0);
+                    canvas.fill(x0, top, filled, bottom, [color[0], color[1], color[2], 230]);
+                }
+                OverlayItem::Divider => {
+                    let middle = y + DIVIDER_HEIGHT / 2.0;
+                    canvas.fill(x0, middle - 1.0, x1, middle + 1.0, LINE_COLOR);
+                }
+            }
+            y += item_height(item);
+        }
+    }
+
+    // A thin line between the columns.
+    if has_right {
+        let x = PADDING + column_width + COLUMN_GAP / 2.0;
+        canvas.fill(x - 1.0, PADDING, x + 1.0, PADDING + content, LINE_COLOR);
+    }
+
+    if let Some((text, color)) = &layout.footer {
+        let y = PADDING + content;
+        canvas.fill(
+            PADDING,
+            y + DIVIDER_HEIGHT / 2.0 - 1.0,
+            width as f32 - PADDING,
+            y + DIVIDER_HEIGHT / 2.0 + 1.0,
+            LINE_COLOR,
+        );
+        canvas.text(
+            font,
+            text,
+            ROW_SIZE,
+            PADDING,
+            y + DIVIDER_HEIGHT + 4.0,
+            false,
+            *color,
+        );
+    }
+
+    (canvas.buffer, used as u32)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn font() -> FontRef<'static> {
+        FontRef::try_from_slice(include_bytes!("../resources/Ubuntu-Medium.ttf")).unwrap()
+    }
+
     #[test]
-    fn rasterizes_lines_onto_the_panel() {
-        let font =
-            FontRef::try_from_slice(include_bytes!("../resources/Ubuntu-Medium.ttf")).unwrap();
-        let (buffer, used) = rasterize(
-            &font,
-            &[
-                OverlayLine::new("72 fps", [80, 220, 120]),
-                OverlayLine::new("Latency 42 ms", [255, 255, 255]),
+    fn rasterizes_two_columns_and_a_footer() {
+        let layout = OverlayLayout {
+            left: vec![
+                OverlayItem::header("Performance"),
+                OverlayItem::row("FPS", "72", [80, 220, 120]),
+                OverlayItem::Divider,
+                OverlayItem::row("Latency", "42 ms", [255, 255, 255]),
             ],
+            right: vec![
+                OverlayItem::header("Quest 3"),
+                OverlayItem::Bar {
+                    fraction: 0.5,
+                    color: [80, 220, 120],
+                },
+            ],
+            footer: Some(("Squeeze grip to move".into(), [120, 210, 255])),
+        };
+        let (buffer, used) = rasterize(&font(), &layout);
+        let content = HEADER_HEIGHT + ROW_HEIGHT + DIVIDER_HEIGHT + ROW_HEIGHT;
+        let expected = (PADDING * 2.0 + content + DIVIDER_HEIGHT + ROW_HEIGHT).ceil() as u32;
+        assert_eq!(used, expected);
+        // Green text and bar pixels exist, in both halves of the panel.
+        let green_at = |x_range: std::ops::Range<usize>| {
+            (0..used as usize)
+                .flat_map(|y| x_range.clone().map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let p = &buffer[(y * TEXTURE_WIDTH as usize + x) * 4..][..4];
+                    p[1] > 150 && p[0] < 140 && p[2] < 160
+                })
+                .count()
+        };
+        let half = TEXTURE_WIDTH as usize / 2;
+        assert!(green_at(0..half) > 30, "left column value");
+        assert!(
+            green_at(half..TEXTURE_WIDTH as usize) > 300,
+            "right column bar"
         );
-        assert_eq!(used, (PADDING * 2.0 + LINE_HEIGHT * 2.0).ceil() as u32);
-        // Some text pixels were drawn in the line color, the rest is background.
-        let green = buffer
-            .chunks_exact(4)
-            .filter(|p| p[1] > 150 && p[0] < 120)
-            .count();
-        assert!(green > 50, "{green}");
         // Below the panel stays transparent.
         let below = &buffer[(used as usize + 1) * TEXTURE_WIDTH as usize * 4..];
         assert!(below.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn values_are_right_aligned() {
+        let layout = OverlayLayout {
+            left: vec![OverlayItem::row("A", "999", [255, 0, 0])],
+            ..Default::default()
+        };
+        let (buffer, used) = rasterize(&font(), &layout);
+        // The red value ends near the right edge of the (single) column.
+        let red_x = (0..used as usize)
+            .flat_map(|y| (0..TEXTURE_WIDTH as usize).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = &buffer[(y * TEXTURE_WIDTH as usize + x) * 4..][..4];
+                p[0] > 200 && p[1] < 80 && p[3] > 100
+            })
+            .map(|(x, _)| x)
+            .max()
+            .unwrap();
+        assert!(
+            red_x as f32 > TEXTURE_WIDTH as f32 - PADDING - 40.0,
+            "{red_x}"
+        );
     }
 
     // Must match the WGSL PushConstant layout, or colors and opacity come out
@@ -466,7 +706,7 @@ mod tests {
     fn empty_overlay_draws_nothing() {
         let font =
             FontRef::try_from_slice(include_bytes!("../resources/Ubuntu-Medium.ttf")).unwrap();
-        let (buffer, used) = rasterize(&font, &[]);
+        let (buffer, used) = rasterize(&font, &OverlayLayout::default());
         assert_eq!(used, 0);
         assert!(buffer.iter().all(|b| *b == 0));
     }

@@ -4,7 +4,7 @@ mod staging;
 mod stream;
 
 pub use lobby::*;
-pub use overlay::{OverlayAnchor, OverlayBeam, OverlayLine, OverlayRenderer};
+pub use overlay::{OverlayAnchor, OverlayBeam, OverlayItem, OverlayLayout, OverlayRenderer};
 pub use stream::*;
 
 use alvr_common::{

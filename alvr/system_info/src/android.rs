@@ -218,6 +218,83 @@ pub fn set_wifi_lock(enabled: bool) {
     .unwrap();
 }
 
+// KiraVR: Everything the performance overlay needs to estimate power and
+// battery time. Values Android does not provide are None.
+#[derive(Clone, Copy, Debug)]
+pub struct BatteryDetails {
+    // 0 to 1
+    pub level: f32,
+    pub plugged: bool,
+    pub voltage_mv: Option<i32>,
+    // Remaining charge in microampere-hours.
+    pub charge_counter_uah: Option<i64>,
+    // Instantaneous current in microamperes, sign depends on the device.
+    pub current_now_ua: Option<i64>,
+}
+
+pub fn get_battery_details() -> Option<BatteryDetails> {
+    vm().attach_current_thread(|env| {
+        let intent_action_jstring = env.new_string("android.intent.action.BATTERY_CHANGED")?;
+        let intent_filter = env.new_object(
+            jni_str!("android/content/IntentFilter"),
+            jni_sig!("(Ljava/lang/String;)V"),
+            &[(&intent_action_jstring).into()],
+        )?;
+        let battery_intent = env
+            .call_method(
+                unsafe { JObject::global_kind_from_raw(context()) },
+                jni_str!("registerReceiver"),
+                jni_sig!(
+                    "(Landroid/content/BroadcastReceiver;Landroid/content/IntentFilter;)Landroid/content/Intent;"
+                ),
+                &[(&JObject::null()).into(), (&intent_filter).into()],
+            )?
+            .l()?;
+
+        let mut extra = |key: &str| -> JniResult<i32> {
+            let key_jstring = env.new_string(key)?;
+            env.call_method(
+                &battery_intent,
+                jni_str!("getIntExtra"),
+                jni_sig!("(Ljava/lang/String;I)I"),
+                &[(&key_jstring).into(), (-1).into()],
+            )?
+            .i()
+        };
+        let level = extra("level")?;
+        let scale = extra("scale")?;
+        let plugged = extra("plugged")?;
+        let voltage = extra("voltage")?;
+
+        // BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER = 1, CURRENT_NOW = 2.
+        // Unsupported properties return Integer.MIN_VALUE (or 0 on some).
+        let battery_manager = get_system_service(env, "batterymanager")?;
+        let mut property = |id: i32| -> JniResult<Option<i64>> {
+            let value = env
+                .call_method(
+                    &battery_manager,
+                    jni_str!("getIntProperty"),
+                    jni_sig!("(I)I"),
+                    &[id.into()],
+                )?
+                .i()?;
+            Ok((value != i32::MIN && value != 0).then_some(value as i64))
+        };
+        let charge_counter_uah = property(1)?;
+        let current_now_ua = property(2)?;
+
+        JniResult::Ok(BatteryDetails {
+            level: if scale > 0 { level as f32 / scale as f32 } else { 0.0 },
+            plugged: plugged > 0,
+            voltage_mv: (voltage > 0).then_some(voltage),
+            charge_counter_uah,
+            current_now_ua,
+        })
+    })
+    .map_err(|e| warn!("Could not read battery details: {e}"))
+    .ok()
+}
+
 pub fn get_battery_status() -> (f32, bool) {
     vm().attach_current_thread(|env| {
         let intent_action_jstring = env.new_string("android.intent.action.BATTERY_CHANGED")?;

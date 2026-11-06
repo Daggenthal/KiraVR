@@ -291,7 +291,8 @@ fn connection_pipeline(
 
     ctx.video_frame_metadata_queue.lock().clear();
 
-    *ctx.perf.lock() = crate::perf::PerfTracker::default();
+    // Battery history survives reconnects, stream numbers start over.
+    ctx.perf.lock().reset_stream_stats();
 
     let video_receive_thread = thread::spawn({
         let ctx = Arc::clone(&ctx);
@@ -463,6 +464,8 @@ fn connection_pipeline(
 
             #[cfg(target_os = "android")]
             let mut battery_deadline = Instant::now();
+            #[cfg(target_os = "android")]
+            let mut perf_battery_deadline = Instant::now();
 
             while is_streaming(&ctx) && *lifecycle_state.read() == LifecycleState::Resumed {
                 if let Ok(packet) = log_channel_receiver.recv_timeout(STREAMING_RECV_TIMEOUT)
@@ -497,6 +500,24 @@ fn connection_pipeline(
                     }
 
                     battery_deadline = Instant::now() + Duration::from_secs(5);
+                }
+
+                // KiraVR: Battery history for the performance overlay's
+                // power and time estimates.
+                #[cfg(target_os = "android")]
+                if Instant::now() > perf_battery_deadline {
+                    if let Some(details) = alvr_system_info::get_battery_details() {
+                        ctx.perf
+                            .lock()
+                            .on_battery_sample(crate::perf::BatterySample {
+                                at: Instant::now(),
+                                level: details.level,
+                                plugged: details.plugged,
+                                voltage_mv: details.voltage_mv,
+                                charge_counter_uah: details.charge_counter_uah,
+                            });
+                    }
+                    perf_battery_deadline = Instant::now() + crate::perf::BATTERY_SAMPLE_INTERVAL;
                 }
             }
 

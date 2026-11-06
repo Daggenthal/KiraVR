@@ -494,6 +494,7 @@ impl StreamContext {
                 refresh_hz: self.config.refresh_rate_hint,
                 codec: self.decoder.as_ref().map(|(config, _)| config.codec),
                 wired: self.config.wired,
+                headset: self.core_context.platform().to_string(),
             };
             let grips = *self.perf_overlay_grip_poses.lock();
             let aims = *self.perf_overlay_aim_poses.lock();

@@ -3,7 +3,10 @@
 // refreshes the text twice a second from the headset's and the streamer's
 // numbers.
 
-use alvr_client_core::{ClientCoreContext, OverlayPoses, perf::PerfSnapshot};
+use alvr_client_core::{
+    ClientCoreContext, OverlayPoses,
+    perf::{BatteryEstimate, PerfSnapshot, PowerFlow},
+};
 use alvr_common::{
     Pose, ViewParams,
     glam::{Mat3, Mat4, Quat, UVec2, Vec3},
@@ -13,7 +16,7 @@ use alvr_common::{
         RIGHT_THUMBSTICK_CLICK_ID,
     },
 };
-use alvr_graphics::{OverlayAnchor, OverlayBeam, OverlayLine, OverlayRenderer};
+use alvr_graphics::{OverlayAnchor, OverlayBeam, OverlayItem, OverlayLayout, OverlayRenderer};
 use alvr_packets::{ButtonEntry, ButtonValue};
 use alvr_session::{
     CodecType, PerformanceOverlayConfig, PerformanceOverlayMode, PerformanceOverlayPosition,
@@ -32,8 +35,9 @@ const TEXT_REFRESH: Duration = Duration::from_millis(500);
 
 // Panel width in meters at 1 m in view (scaled with distance so it keeps its
 // apparent size) and on the wrist.
-const IN_VIEW_WIDTH_PER_METER: f32 = 0.30;
-const WRIST_WIDTH: f32 = 0.11;
+// The panel holds two columns, so it is wider than tall.
+const IN_VIEW_WIDTH_PER_METER: f32 = 0.50;
+const WRIST_WIDTH: f32 = 0.18;
 // From the controller grip toward the elbow, and out of the back of the hand.
 const WRIST_TOWARD_ELBOW: f32 = 0.12;
 const WRIST_OUT_OF_HAND: f32 = 0.045;
@@ -209,6 +213,8 @@ pub struct StreamInfo {
     pub refresh_hz: f32,
     pub codec: Option<CodecType>,
     pub wired: bool,
+    // Shown as the battery section's title.
+    pub headset: String,
 }
 
 // A panel held by a controller: Its pose in that hand's space.
@@ -365,11 +371,12 @@ impl PerfOverlay {
             return;
         }
         self.last_text = Some(Instant::now());
-        let mut lines = build_lines(self.mode, &core.perf_snapshot(), info);
-        if let Some(hint) = self.hint {
-            lines.push(OverlayLine::new(hint, CYAN));
-        }
-        overlay.update(&lines);
+        overlay.update(&build_layout(
+            self.mode,
+            &core.perf_snapshot(),
+            info,
+            self.hint,
+        ));
     }
 
     // Positions the panel, and lets a controller grab and move it.
@@ -700,44 +707,129 @@ fn level(value: f32, good_below: f32, bad_from: f32) -> [u8; 3] {
     }
 }
 
-pub fn build_lines(
+// "1 h 20 min", "45 min", "Under 1 min".
+pub fn format_duration(duration: Duration) -> String {
+    let minutes = (duration.as_secs_f32() / 60.0).round() as u64;
+    match minutes {
+        0 => "Under 1 min".into(),
+        1..=59 => format!("{minutes} min"),
+        _ => format!("{} h {} min", minutes / 60, minutes % 60),
+    }
+}
+
+fn battery_items(battery: Option<&BatteryEstimate>) -> Vec<OverlayItem> {
+    let Some(battery) = battery else {
+        return vec![OverlayItem::row("Battery", "Unavailable", GRAY)];
+    };
+    let percent = (battery.level * 100.0).round();
+    let level_color = if battery.level > 0.4 {
+        GREEN
+    } else if battery.level > 0.2 {
+        YELLOW
+    } else {
+        RED
+    };
+    let watts = |w: Option<f32>| w.map(|w| format!("{w:.1} W")).unwrap_or_default();
+
+    let mut items = vec![
+        OverlayItem::Bar {
+            fraction: battery.level,
+            color: level_color,
+        },
+        OverlayItem::row("Battery", format!("{percent:.0}%"), level_color),
+    ];
+    match battery.flow {
+        PowerFlow::Estimating => {
+            items.push(OverlayItem::row(
+                if battery.plugged {
+                    "Plugged in"
+                } else {
+                    "On battery"
+                },
+                "Estimating...",
+                GRAY,
+            ));
+        }
+        PowerFlow::Charging => {
+            items.push(OverlayItem::row("Charging", watts(battery.watts), GREEN));
+            if let Some(left) = battery.time_left {
+                // Charging slows down near full, so this is optimistic.
+                items.push(OverlayItem::row(
+                    "To 100%",
+                    format!("~{}", format_duration(left)),
+                    WHITE,
+                ));
+            }
+        }
+        PowerFlow::Discharging | PowerFlow::PluggedButDraining => {
+            if battery.flow == PowerFlow::PluggedButDraining {
+                // The charger gives less than the headset uses.
+                items.push(OverlayItem::row(
+                    "Plugged in, draining",
+                    watts(battery.watts),
+                    YELLOW,
+                ));
+            } else {
+                items.push(OverlayItem::row("Discharging", watts(battery.watts), WHITE));
+            }
+            if let Some(left) = battery.time_left {
+                items.push(OverlayItem::row(
+                    "To 10%",
+                    format_duration(left),
+                    level_color,
+                ));
+            }
+        }
+    }
+    items
+}
+
+pub fn build_layout(
     mode: PerformanceOverlayMode,
     snap: &PerfSnapshot,
     info: &StreamInfo,
-) -> Vec<OverlayLine> {
+    hint: Option<&str>,
+) -> OverlayLayout {
     if mode == PerformanceOverlayMode::Hidden {
-        return vec![];
+        return OverlayLayout::default();
     }
     let client = &snap.client;
-    let mut lines = vec![];
+    let full = mode == PerformanceOverlayMode::Full;
 
-    let Some(server) = &snap.server else {
-        lines.push(OverlayLine::new(
-            format!("{:.0} fps received", client.received_fps),
-            fps_color(client.received_fps, info.refresh_hz),
-        ));
-        lines.push(OverlayLine::new("Waiting for streamer stats...", GRAY));
-        return lines;
-    };
-
-    // Compact: The four numbers that say whether things are fine.
-    lines.push(OverlayLine::new(
-        format!("{:.0} fps", server.client_fps),
-        fps_color(server.client_fps, info.refresh_hz),
-    ));
-    lines.push(OverlayLine::new(
-        format!("Latency {:.0} ms", server.total_ms),
-        level(server.total_ms, 60.0, 90.0),
-    ));
-    lines.push(OverlayLine::new(
-        format!("{:.1} Mbps", server.bitrate_mbps),
-        WHITE,
-    ));
-    lines.push(OverlayLine::new(
-        format!(
-            "Loss {:.1}%  Jitter {:.1} ms",
-            client.loss_percent, client.jitter_ms
-        ),
+    let mut left = vec![];
+    if full {
+        left.push(OverlayItem::header("Performance"));
+    }
+    match &snap.server {
+        Some(server) => {
+            left.push(OverlayItem::row(
+                "FPS",
+                format!("{:.0}", server.client_fps),
+                fps_color(server.client_fps, info.refresh_hz),
+            ));
+            left.push(OverlayItem::row(
+                "Latency",
+                format!("{:.0} ms", server.total_ms),
+                level(server.total_ms, 60.0, 90.0),
+            ));
+            left.push(OverlayItem::row(
+                "Bitrate",
+                format!("{:.1} Mbps", server.bitrate_mbps),
+                WHITE,
+            ));
+        }
+        None => {
+            left.push(OverlayItem::row(
+                "FPS",
+                format!("{:.0}", client.received_fps),
+                fps_color(client.received_fps, info.refresh_hz),
+            ));
+            left.push(OverlayItem::row("Streamer", "Waiting...", GRAY));
+        }
+    }
+    left.push(OverlayItem::row(
+        "Loss / Jitter",
+        format!("{:.1}% / {:.1} ms", client.loss_percent, client.jitter_ms),
         if client.loss_percent >= 1.0 || client.jitter_ms >= 8.0 {
             RED
         } else if client.loss_percent > 0.0 || client.jitter_ms >= 3.0 {
@@ -747,65 +839,75 @@ pub fn build_lines(
         },
     ));
 
-    if mode == PerformanceOverlayMode::Full {
+    if full {
         let codec = match info.codec {
             Some(CodecType::H264) => "H.264",
             Some(CodecType::Hevc) => "HEVC",
             Some(CodecType::AV1) => "AV1",
             None => "?",
         };
-        lines.push(OverlayLine::new(
-            format!(
-                "{}x{} @ {:.0} Hz  {codec}  {}",
-                info.view_resolution.x,
-                info.view_resolution.y,
-                info.refresh_hz,
-                if info.wired { "Wired" } else { "Wi-Fi" }
-            ),
-            GRAY,
+        left.push(OverlayItem::Divider);
+        left.push(OverlayItem::header("Stream"));
+        left.push(OverlayItem::row(
+            "Resolution",
+            format!("{}x{}", info.view_resolution.x, info.view_resolution.y),
+            WHITE,
         ));
-        lines.push(OverlayLine::new(
-            format!(
-                "Streamer {:.0} fps  Headset {:.0} fps",
-                server.server_fps, server.client_fps
-            ),
-            fps_color(server.server_fps.min(server.client_fps), info.refresh_hz),
+        left.push(OverlayItem::row(
+            "Refresh / Codec",
+            format!("{:.0} Hz / {codec}", info.refresh_hz),
+            WHITE,
         ));
-        lines.push(OverlayLine::new("Latency Breakdown", WHITE));
-        let stage = |name: &str, ms: f32| format!("  {name} {ms:.1}");
-        lines.push(OverlayLine::new(
-            [
-                stage("Game", server.game_ms),
-                stage("Compose", server.server_compositor_ms),
-                stage("Encode", server.encoder_ms),
-            ]
-            .join(""),
-            GRAY,
+        left.push(OverlayItem::row(
+            "Connection",
+            if info.wired { "Wired" } else { "Wi-Fi" },
+            WHITE,
         ));
-        lines.push(OverlayLine::new(
-            [
-                stage("Network", server.network_ms),
-                stage("Decode", server.decoder_ms),
-            ]
-            .join(""),
-            level(server.network_ms, 10.0, 25.0),
-        ));
-        lines.push(OverlayLine::new(
-            [
-                stage("Queue", server.decoder_queue_ms),
-                stage("Render", server.client_compositor_ms),
-                stage("Vsync", server.vsync_queue_ms),
-            ]
-            .join(""),
-            GRAY,
-        ));
-        lines.push(OverlayLine::new(
-            format!("Packets lost this session: {}", client.lost_total),
+        if let Some(server) = &snap.server {
+            left.push(OverlayItem::row(
+                "Streamer / Headset",
+                format!("{:.0} / {:.0} fps", server.server_fps, server.client_fps),
+                fps_color(server.server_fps.min(server.client_fps), info.refresh_hz),
+            ));
+            let pair = |a: f32, b: f32| format!("{a:.1} / {b:.1} ms");
+            left.push(OverlayItem::Divider);
+            left.push(OverlayItem::header("Latency"));
+            left.push(OverlayItem::row(
+                "Game / Compose",
+                pair(server.game_ms, server.server_compositor_ms),
+                GRAY,
+            ));
+            left.push(OverlayItem::row(
+                "Encode / Network",
+                pair(server.encoder_ms, server.network_ms),
+                level(server.network_ms, 10.0, 25.0),
+            ));
+            left.push(OverlayItem::row(
+                "Decode / Queue",
+                pair(server.decoder_ms, server.decoder_queue_ms),
+                GRAY,
+            ));
+            left.push(OverlayItem::row(
+                "Render / Vsync",
+                pair(server.client_compositor_ms, server.vsync_queue_ms),
+                GRAY,
+            ));
+        }
+        left.push(OverlayItem::row(
+            "Packets lost",
+            client.lost_total.to_string(),
             if client.lost_total == 0 { GREEN } else { GRAY },
         ));
     }
 
-    lines
+    let mut right = vec![OverlayItem::header(info.headset.clone())];
+    right.extend(battery_items(snap.battery.as_ref()));
+
+    OverlayLayout {
+        left,
+        right,
+        footer: hint.map(|h| (h.to_owned(), CYAN)),
+    }
 }
 
 #[cfg(test)]
@@ -1007,14 +1109,29 @@ mod tests {
         assert_eq!(next_mode(Full), Hidden);
     }
 
-    #[test]
-    fn compact_and_full_lines() {
-        let info = StreamInfo {
+    fn info(refresh_hz: f32, wired: bool) -> StreamInfo {
+        StreamInfo {
             view_resolution: UVec2::new(2144, 1072),
-            refresh_hz: 72.0,
+            refresh_hz,
             codec: Some(CodecType::Hevc),
-            wired: false,
-        };
+            wired,
+            headset: "Quest 3".into(),
+        }
+    }
+
+    fn value_of<'a>(items: &'a [OverlayItem], label: &str) -> Option<(&'a str, [u8; 3])> {
+        items.iter().find_map(|item| match item {
+            OverlayItem::Row {
+                label: l,
+                value,
+                color,
+            } if l == label => Some((value.as_str(), *color)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn compact_and_full_layouts() {
         let snap = PerfSnapshot {
             client: ClientPerf {
                 received_fps: 72.0,
@@ -1030,32 +1147,34 @@ mod tests {
                 bitrate_mbps: 31.1,
                 ..Default::default()
             }),
+            battery: None,
         };
-        let compact = build_lines(PerformanceOverlayMode::Compact, &snap, &info);
-        assert_eq!(compact.len(), 4);
-        assert_eq!(compact[0].text, "72 fps");
-        assert_eq!(compact[0].color, GREEN);
-        assert_eq!(compact[1].text, "Latency 55 ms");
-        assert_eq!(compact[3].color, GREEN);
-
-        let full = build_lines(PerformanceOverlayMode::Full, &snap, &info);
-        assert!(full.len() > compact.len());
-        assert!(
-            full.iter()
-                .any(|l| l.text.contains("2144x1072 @ 72 Hz  HEVC  Wi-Fi"))
+        let info = info(72.0, false);
+        let compact = build_layout(PerformanceOverlayMode::Compact, &snap, &info, None);
+        assert_eq!(value_of(&compact.left, "FPS"), Some(("72", GREEN)));
+        assert_eq!(value_of(&compact.left, "Latency").unwrap().0, "55 ms");
+        assert_eq!(value_of(&compact.left, "Loss / Jitter").unwrap().1, GREEN);
+        assert_eq!(compact.right[0], OverlayItem::header("Quest 3"));
+        assert_eq!(
+            value_of(&compact.right, "Battery").unwrap().0,
+            "Unavailable"
         );
+        assert!(compact.footer.is_none());
 
-        assert!(build_lines(PerformanceOverlayMode::Hidden, &snap, &info).is_empty());
+        let full = build_layout(PerformanceOverlayMode::Full, &snap, &info, Some("Hint"));
+        assert!(full.left.len() > compact.left.len());
+        assert_eq!(
+            value_of(&full.left, "Refresh / Codec").unwrap().0,
+            "72 Hz / HEVC"
+        );
+        assert_eq!(value_of(&full.left, "Connection").unwrap().0, "Wi-Fi");
+        assert_eq!(full.footer.as_ref().unwrap().0, "Hint");
+
+        assert!(build_layout(PerformanceOverlayMode::Hidden, &snap, &info, None).is_empty());
     }
 
     #[test]
     fn bad_numbers_turn_red() {
-        let info = StreamInfo {
-            view_resolution: UVec2::new(2144, 1072),
-            refresh_hz: 90.0,
-            codec: None,
-            wired: true,
-        };
         let snap = PerfSnapshot {
             client: ClientPerf {
                 received_fps: 50.0,
@@ -1068,10 +1187,67 @@ mod tests {
                 total_ms: 120.0,
                 ..Default::default()
             }),
+            battery: None,
         };
-        let lines = build_lines(PerformanceOverlayMode::Compact, &snap, &info);
-        assert_eq!(lines[0].color, RED);
-        assert_eq!(lines[1].color, RED);
-        assert_eq!(lines[3].color, RED);
+        let layout = build_layout(
+            PerformanceOverlayMode::Compact,
+            &snap,
+            &info(90.0, true),
+            None,
+        );
+        assert_eq!(value_of(&layout.left, "FPS").unwrap().1, RED);
+        assert_eq!(value_of(&layout.left, "Latency").unwrap().1, RED);
+        assert_eq!(value_of(&layout.left, "Loss / Jitter").unwrap().1, RED);
+    }
+
+    #[test]
+    fn battery_section_says_what_is_happening() {
+        let battery = |flow, watts, minutes: Option<u64>, level| BatteryEstimate {
+            level,
+            plugged: flow != PowerFlow::Discharging,
+            flow,
+            watts,
+            time_left: minutes.map(|m| Duration::from_secs(m * 60)),
+        };
+        let items = battery_items(Some(&battery(
+            PowerFlow::Discharging,
+            Some(6.84),
+            Some(80),
+            0.62,
+        )));
+        assert_eq!(value_of(&items, "Battery"), Some(("62%", GREEN)));
+        assert_eq!(value_of(&items, "Discharging").unwrap().0, "6.8 W");
+        assert_eq!(value_of(&items, "To 10%").unwrap().0, "1 h 20 min");
+
+        let items = battery_items(Some(&battery(
+            PowerFlow::Charging,
+            Some(4.2),
+            Some(55),
+            0.30,
+        )));
+        assert_eq!(value_of(&items, "Charging").unwrap().0, "4.2 W");
+        assert_eq!(value_of(&items, "To 100%").unwrap().0, "~55 min");
+
+        let items = battery_items(Some(&battery(
+            PowerFlow::PluggedButDraining,
+            Some(1.1),
+            Some(180),
+            0.16,
+        )));
+        assert_eq!(
+            value_of(&items, "Plugged in, draining"),
+            Some(("1.1 W", YELLOW))
+        );
+        assert_eq!(value_of(&items, "Battery").unwrap().1, RED);
+
+        let items = battery_items(Some(&battery(PowerFlow::Estimating, None, None, 0.5)));
+        assert_eq!(value_of(&items, "Plugged in").unwrap().0, "Estimating...");
+    }
+
+    #[test]
+    fn durations_read_naturally() {
+        assert_eq!(format_duration(Duration::from_secs(20)), "Under 1 min");
+        assert_eq!(format_duration(Duration::from_secs(45 * 60)), "45 min");
+        assert_eq!(format_duration(Duration::from_secs(80 * 60)), "1 h 20 min");
     }
 }

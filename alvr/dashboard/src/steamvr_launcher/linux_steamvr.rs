@@ -178,7 +178,6 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
     let steamvr_opts = "For functioning VR you need to put the following line into SteamVR's launch options and restart it:";
     let game_opts = "And this similar line to the launch options of ALL games that you're trying to launch from steam:";
 
-    let mut vrmonitor_path_written = false;
     if have_igpu {
         if have_nvidia_dgpu {
             let base_path = "/usr/share/vulkan/icd.d/nvidia_icd";
@@ -195,12 +194,9 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
 
             warn!("{steamvr_opts}\n{nv_options} {vrmonitor_path_string} %command%");
             warn!("{game_opts}\n{nv_options} %command%");
-
-            vrmonitor_path_written = true;
         } else if have_intel_dgpu || have_amd_dgpu {
             warn!("{steamvr_opts}\nDRI_PRIME=1 {vrmonitor_path_string} %command%");
             warn!("{game_opts}\nDRI_PRIME=1 %command%");
-            vrmonitor_path_written = true;
         } else {
             warn!(
                 "Beware, using just integrated graphics might lead to very poor performance in SteamVR and VR games."
@@ -210,12 +206,10 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
             )
         }
     }
-    if !vrmonitor_path_written {
-        warn!(
-            "Make sure you have put the following line in your SteamVR launch options and restart it:\n\
-            {vrmonitor_path_string} %command%"
-        )
-    }
+    // KiraVR: The generic "put vrmonitor.sh in your launch options" warning
+    // printed here on every launch is gone. SteamVR starts vrmonitor itself,
+    // and a mistyped value took down the Steam client. The preflight check
+    // reports launch options that are actually set.
 }
 
 fn linux_encoder_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {

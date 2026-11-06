@@ -13,6 +13,9 @@ mod linux_checks;
 #[cfg(not(target_arch = "wasm32"))]
 mod logging_backend;
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "linux")]
+mod preflight;
+#[cfg(not(target_arch = "wasm32"))]
 mod steamvr_launcher;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -39,6 +42,20 @@ fn main() {
     use ico::IconDir;
     use std::{env, ffi::OsStr, fs};
     use std::{io::Cursor, sync::mpsc};
+
+    // KiraVR: `alvr_dashboard --preflight [--fix]` prints the system check and
+    // exits. Handled first, so it does not close a dashboard that is open.
+    #[cfg(target_os = "linux")]
+    {
+        let args = env::args().collect::<Vec<_>>();
+        if args.iter().any(|a| a == "--preflight") {
+            let apply_fixes = args.iter().any(|a| a == "--fix");
+            std::process::exit(preflight::print_report(
+                apply_fixes,
+                &get_filesystem_layout(),
+            ));
+        }
+    }
 
     let (server_events_sender, server_events_receiver) = mpsc::channel();
     logging_backend::init_logging(server_events_sender.clone());

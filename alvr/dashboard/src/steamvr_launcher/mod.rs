@@ -141,6 +141,7 @@ impl Launcher {
                 error!("Could not remove a leftover vrcompositor wrapper: {e}");
             }
             linux_steamvr::linux_hardware_checks();
+            crate::preflight::before_launch();
         }
 
         let alvr_driver_dir = crate::get_filesystem_layout().openvr_driver_root_dir;

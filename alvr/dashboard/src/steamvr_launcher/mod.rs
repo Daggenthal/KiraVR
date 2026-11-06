@@ -107,16 +107,16 @@ fn unblock_alvr_driver_within_vrsettings(text: &str) -> Result<String> {
         .unwrap_or(false);
 
     if blocked {
-        debug!("Unblocking ALVR driver in SteamVR.");
+        debug!("Unblocking KiraVR driver in SteamVR.");
         if !values.contains_key(DRIVER_KEY) {
             values.insert(DRIVER_KEY.into(), json!({}));
         }
         let driver = settings[DRIVER_KEY]
             .as_object_mut()
-            .with_context(|| "Did not find ALVR key in settings.")?;
+            .with_context(|| "Did not find the KiraVR driver key in SteamVR settings.")?;
         driver.insert(BLOCKED_KEY.into(), json!(false)); // overwrites if present
     } else {
-        debug!("ALVR is not blocked in SteamVR.");
+        debug!("KiraVR is not blocked in SteamVR.");
     }
 
     Ok(serde_json::to_string_pretty(&settings)?)
@@ -158,7 +158,7 @@ impl Launcher {
         alvr_server_io::driver_registration(&[alvr_driver_dir], true).ok();
 
         if let Err(err) = unblock_alvr_driver() {
-            warn!("Failed to unblock ALVR driver: {:?}", err);
+            warn!("Failed to unblock KiraVR driver: {:?}", err);
         }
 
         if is_steamvr_running() {

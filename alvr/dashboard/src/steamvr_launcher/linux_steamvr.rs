@@ -161,7 +161,7 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
             error!(
                 "Couldn't find OpenVR or SteamVR files. \
                 Please make sure you have installed and ran SteamVR at least once. \
-                Or if you're using Flatpak Steam, make sure to use ALVR Dashboard from Flatpak ALVR. {e}"
+                Or if you're using Flatpak Steam, make sure to use the KiraVR dashboard from inside the Flatpak. {e}"
             );
             return;
         }
@@ -206,7 +206,7 @@ fn linux_gpu_checks(device_infos: &[(&wgpu::Adapter, DeviceInfo)]) {
                 "Beware, using just integrated graphics might lead to very poor performance in SteamVR and VR games."
             );
             warn!(
-                "For more information, please refer to the wiki: https://github.com/alvr-org/ALVR/wiki/Linux-Troubleshooting"
+                "For more information, see the ALVR wiki (KiraVR is based on ALVR): https://github.com/alvr-org/ALVR/wiki/Linux-Troubleshooting"
             )
         }
     }

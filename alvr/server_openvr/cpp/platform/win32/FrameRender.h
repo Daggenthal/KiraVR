@@ -147,7 +147,7 @@ private:
         if (status
             == 0xc0000022) { // STATUS_ACCESS_DENIED, see http://deusexmachina.uk/ntstatus.html
             Info(
-                "[GPU PRIO FIX] Failed to set process (%d) priority class, please run ALVR as "
+                "[GPU PRIO FIX] Failed to set process (%d) priority class, please run KiraVR as "
                 "Administrator.\n",
                 GetCurrentProcess()
             );

@@ -18,18 +18,18 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 const NO_NOTIFICATIONS_MESSAGE: &str = "No new notifications";
 const NOTIFICATION_TIPS: &[&str] = &[
     // The following tips are ordered roughtly in the order settings appear
-    r#"If you started having crashes after changing some settings, reset ALVR by re-running "Run setup wizard" from the "Installation" tab and clicking "Reset settings"."#,
+    r#"If you started having crashes after changing some settings, reset KiraVR by re-running "Run setup wizard" from the "Installation" tab and clicking "Reset settings"."#,
     r#"Some settings are hidden by default. Click the "Expand" button next to some settings to expand the submenus."#,
-    r#"It's highly advisable to keep audio settings as default in ALVR and modify the default audio device in the taskbar tray."#,
+    r#"It's highly advisable to keep audio settings as default in KiraVR and modify the default audio device in the taskbar tray."#,
     r#"Increasing "Video"->"Maximum buffering" may reduce stutters at the cost of more latency."#,
     r#"Sometimes switching between h264 and HEVC codecs is necessary on certain GPUs to fix crashing or fallback to software encoding."#,
     r#"If you're using an NVIDIA GPU, it's best to use high-bitrate H264; if you're using an AMD GPU, HEVC might look better."#,
     r#"If you experience "white snow" flickering, set "Presets"->"Resolution" to "Low" and disable "Video"->"Foveated encoding"."#,
     r#"Increasing "Video"->"Color correction"->"Sharpness" may improve the perceived image quality."#,
-    r#"If you have problems syncing external controllers or trackers to ALVR tracking space, add one element to "Headset"->"Extra OpenVR properties", then set a custom "Tracking system name string"."#,
+    r#"If you have problems syncing external controllers or trackers to KiraVR tracking space, add one element to "Headset"->"Extra OpenVR properties", then set a custom "Tracking system name string"."#,
     r#"To change the visual appearance of controllers, set "Headset"->"Controllers"->"Emulation mode"."#,
-    r#"ALVR supports custom button bindings! If you need help, please ask us on our Discord server."#,
-    r#"ALVR supports hand tracking gestures ("Presets"->"Hand tracking interaction"->"ALVR bindings"). Check out wiki how to use them properly: https://github.com/alvr-org/ALVR/wiki/Hand-tracking-controller-bindings."#,
+    r#"KiraVR supports custom button bindings! If you need help, open an issue at https://github.com/Daggenthal/KiraVR/issues."#,
+    r#"KiraVR supports hand tracking gestures ("Presets"->"Hand tracking interaction"->"KiraVR bindings"). The ALVR wiki explains how to use them: https://github.com/alvr-org/ALVR/wiki/Hand-tracking-controller-bindings."#,
     r#"If hand tracking gestures are annoying, you can disable them in "Headset"->"Controllers"->"Hand tracking interaction". Alternatively, you can enable "Hand tracking interaction"->"Only touch"."#,
     r#"You can fine-tune the controllers' responsiveness with "Headset"->"Controllers"->"Prediction"."#,
     r#"If the visual controller/hand models do not match the physical controller's position, you can tweak the offset in "Headset"->"Controllers"->"Left controller position/rotation offset" (affects both controllers)."#,

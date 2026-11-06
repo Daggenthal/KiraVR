@@ -39,13 +39,13 @@ impl NewVersionPopup {
 
         let result = alvr_gui_common::modal(
             context,
-            "New ALVR version available",
+            "New KiraVR version available",
             Some(|ui: &mut Ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
 
                     ui.vertical(|ui| {
-                        ui.heading(format!("ALVR v{}", self.version));
+                        ui.heading(format!("KiraVR v{}", self.version));
 
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 5.0;
@@ -61,7 +61,7 @@ impl NewVersionPopup {
                                 }
                             } else if ui.button("Download Launcher").clicked() {
                                 let base_url =
-                                    "https://github.com/alvr-org/ALVR/releases/latest/download/";
+                                    "https://github.com/Daggenthal/KiraVR/releases/latest/download/";
                                 let file = if cfg!(windows) {
                                     "alvr_launcher_windows.zip"
                                 } else {
@@ -77,7 +77,7 @@ impl NewVersionPopup {
                         ui.label(&self.message);
                         ui.hyperlink_to(
                             "Releases page",
-                            "https://github.com/alvr-org/ALVR/releases",
+                            "https://github.com/Daggenthal/KiraVR/releases",
                         );
                     });
 

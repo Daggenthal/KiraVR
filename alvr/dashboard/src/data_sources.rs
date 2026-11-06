@@ -149,7 +149,7 @@ impl DataSources {
                     .build()
                     .into();
                 if let Ok(response) = request_agent
-                    .get("https://api.github.com/repos/alvr-org/ALVR/releases/latest")
+                    .get("https://api.github.com/repos/Daggenthal/KiraVR/releases/latest")
                     .call()
                 {
                     let version_data =
@@ -455,7 +455,7 @@ impl DataSources {
 
                         if !matches {
                             error!(
-                                "Server version mismatch: found {version}. Please remove all previous ALVR installations"
+                                "Server version mismatch: found {version}. Please remove all previous KiraVR and ALVR installations"
                             );
                         }
 

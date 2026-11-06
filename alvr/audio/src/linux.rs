@@ -235,8 +235,11 @@ fn pw_main_loop(
 // KiraVR: Point the PipeWire defaults at the headset while streaming and put
 // back whatever the user had before. These are the same keys `wpctl
 // set-default` and desktop sound settings write.
-const SPEAKER_NODE_NAME: &str = "ALVR Audio";
-const MIC_NODE_NAME: &str = "ALVR Microphone";
+const SPEAKER_NODE_NAME: &str = "KiraVR Audio";
+const MIC_NODE_NAME: &str = "KiraVR Microphone";
+// Names used before the rename. A saved default pointing at one of these is
+// stale and must not be restored.
+const LEGACY_NODE_NAMES: &[&str] = &["ALVR Audio", "ALVR Microphone"];
 const DEFAULT_SINK_KEY: &str = "default.configured.audio.sink";
 const DEFAULT_SOURCE_KEY: &str = "default.configured.audio.source";
 // What the session manager is actually using right now. Used when the
@@ -251,7 +254,9 @@ fn node_json(name: &str) -> String {
 }
 
 fn is_alvr_node(value: &str) -> bool {
-    value.contains(SPEAKER_NODE_NAME) || value.contains(MIC_NODE_NAME)
+    value.contains(SPEAKER_NODE_NAME)
+        || value.contains(MIC_NODE_NAME)
+        || LEGACY_NODE_NAMES.iter().any(|n| value.contains(n))
 }
 
 #[derive(Default)]
@@ -506,7 +511,7 @@ fn create_speaker_stream(
         pw_core.clone(),
         "alvr-audio",
         properties::properties! {
-            *keys::NODE_NAME => "ALVR Audio",
+            *keys::NODE_NAME => SPEAKER_NODE_NAME,
             *keys::MEDIA_NAME => "alvr-audio",
             *keys::MEDIA_TYPE => "Audio",
             *keys::MEDIA_CATEGORY => "Capture",
@@ -557,7 +562,7 @@ fn create_mic_stream(
         pw_core.clone(),
         "alvr-mic",
         properties::properties! {
-            *keys::NODE_NAME => "ALVR Microphone",
+            *keys::NODE_NAME => MIC_NODE_NAME,
             *keys::MEDIA_NAME => "alvr-mic",
             *keys::MEDIA_TYPE => "Audio",
             *keys::MEDIA_CATEGORY => "Playback",

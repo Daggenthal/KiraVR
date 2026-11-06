@@ -255,9 +255,9 @@ pub fn entry_point() {
     let xr_instance = xr_entry
         .create_instance(
             &xr::ApplicationInfo {
-                application_name: "ALVR Client",
+                application_name: "KiraVR Client",
                 application_version: 0,
-                engine_name: "ALVR",
+                engine_name: "KiraVR",
                 engine_version: 0,
                 api_version: openxr_version,
             },

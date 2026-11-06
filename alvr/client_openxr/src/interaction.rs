@@ -197,7 +197,7 @@ impl InteractionContext {
         let xr_instance = xr_session.instance();
 
         let action_set = xr_instance
-            .create_action_set("alvr_interaction", "ALVR interaction", 0)
+            .create_action_set("alvr_interaction", "KiraVR interaction", 0)
             .unwrap();
 
         let mut bindings = vec![];

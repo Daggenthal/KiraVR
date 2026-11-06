@@ -37,7 +37,7 @@ use alvr_audio as audio;
 
 const INITIAL_MESSAGE: &str = concat!(
     "Searching for streamer...\n",
-    "Open ALVR on your PC then click \"Trust\"\n",
+    "Open KiraVR on your PC then click \"Trust\"\n",
     "next to the device entry",
 );
 const SUCCESS_CONNECT_MESSAGE: &str = "Successful connection!\nPlease wait...";
@@ -71,7 +71,7 @@ pub struct ConnectionContext {
 
 fn set_hud_message(event_queue: &Mutex<VecDeque<ClientCoreEvent>>, message: &str) {
     let message = format!(
-        "ALVR v{}\nhostname: {}\nIP: {}\n\n{message}",
+        "KiraVR v{}\nhostname: {}\nIP: {}\n\n{message}",
         *ALVR_VERSION,
         Config::load().hostname,
         alvr_system_info::local_ip(),

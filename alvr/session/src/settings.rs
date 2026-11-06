@@ -753,7 +753,7 @@ For eye-tracked foveation, enable Headset > Face tracking > Sink > Eye-tracked f
 
     #[cfg_attr(not(target_os = "windows"), schema(flag = "hidden"))]
     #[schema(strings(
-        help = "You probably don't want to change this. Allows for changing adapter for ALVR compositor."
+        help = "You probably don't want to change this. Allows for changing adapter for the KiraVR compositor."
     ))]
     #[schema(flag = "steamvr-restart")]
     pub adapter_index: u32,
@@ -820,7 +820,7 @@ pub enum MicrophoneDevicesConfig {
     #[schema(strings(display_name = "VoiceMeeter VAIO3"))]
     VoiceMeeterVaio3,
     Custom {
-        #[schema(strings(help = "This device is used by ALVR to output microphone audio"))]
+        #[schema(strings(help = "This device is used by KiraVR to output microphone audio"))]
         sink: CustomAudioDeviceConfig,
         #[schema(strings(help = "This device is set in SteamVR as the default microphone"))]
         source: CustomAudioDeviceConfig,
@@ -854,8 +854,8 @@ pub struct AudioConfig {
     pub microphone: Switch<MicrophoneConfig>,
 
     // KiraVR: On Windows SteamVR switches devices through the HMD audio
-    // properties. On Linux nothing did, so users had to pick "ALVR Audio" and
-    // "ALVR Microphone" by hand every session.
+    // properties. On Linux nothing did, so users had to pick the headset speaker and
+    // microphone by hand every session.
     #[cfg_attr(not(target_os = "linux"), schema(flag = "hidden"))]
     #[schema(strings(
         display_name = "Switch system audio to the headset",
@@ -1412,12 +1412,12 @@ TCP: Slower than UDP, but more stable. Pick this if you experience video or audi
     pub client_discovery: Switch<DiscoveryConfig>,
 
     #[schema(strings(
-        help = r#"Which release type of client should ALVR look for when establishing a wired connection."#
+        help = r#"Which release type of client should KiraVR look for when establishing a wired connection."#
     ))]
     pub wired_client_type: ClientFlavor,
 
     #[schema(strings(
-        help = r#"Wether ALVR should try to automatically launch the client when establishing a wired connection."#
+        help = r#"Whether KiraVR should try to automatically launch the client when establishing a wired connection."#
     ))]
     pub wired_client_autolaunch: Switch<WiredClientAutoLaunchConfig>,
 
@@ -1452,7 +1452,7 @@ TCP: Slower than UDP, but more stable. Pick this if you experience video or audi
 
     #[schema(strings(
         display_name = "Allow untrusted HTTP",
-        help = "Allow cross-origin browser requests to control ALVR settings remotely."
+        help = "Allow cross-origin browser requests to control KiraVR settings remotely."
     ))]
     pub allow_untrusted_http: bool,
 
@@ -1532,7 +1532,7 @@ pub struct RawEventsConfig {
 
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct LoggingConfig {
-    #[schema(strings(help = "Notification tips teach you how to use ALVR"))]
+    #[schema(strings(help = "Notification tips teach you how to use KiraVR"))]
     pub show_notification_tip: bool,
 
     #[schema(strings(help = "This applies only to certain error or warning messages."))]
@@ -1568,7 +1568,7 @@ pub struct LoggingConfig {
 pub struct SteamvrLauncher {
     #[schema(strings(
         display_name = "Open and close SteamVR automatically",
-        help = "Launches SteamVR automatically when the ALVR dashboard is opened, and closes it when the dashboard is closed."
+        help = "Launches SteamVR automatically when the KiraVR dashboard is opened, and closes it when the dashboard is closed."
     ))]
     pub open_close_steamvr_with_dashboard: bool,
 
@@ -2190,7 +2190,7 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
             },
             wired_client_type: ClientFlavorDefault {
-                Custom: "alvr.client".to_owned(),
+                Custom: "dev.daggenthal.kiravr".to_owned(),
                 variant: if alvr_common::is_stable() {
                     ClientFlavorDefaultVariant::Store
                 } else {

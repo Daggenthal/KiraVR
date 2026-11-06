@@ -428,7 +428,7 @@ ALVR bindings: use ALVR hand tracking button bindings. Check the wiki for help.
                 content: None,
             },
             HigherOrderChoiceOption {
-                display_name: "ALVR bindings".into(),
+                display_name: "KiraVR bindings".into(),
                 modifiers: vec![
                     bool_modifier("session_settings.headset.controllers.enabled", true),
                     bool_modifier(

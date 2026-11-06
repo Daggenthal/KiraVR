@@ -3,14 +3,22 @@ use alvr_gui_common::theme;
 use eframe::egui::{Frame, RichText, ScrollArea, Ui};
 
 pub fn about_tab_ui(ui: &mut Ui) {
-    ui.label(RichText::new(format!("ALVR streamer v{}", *ALVR_VERSION)).size(30.0));
+    ui.label(RichText::new(format!("KiraVR streamer v{}", *ALVR_VERSION)).size(30.0));
     ui.add_space(10.0);
-    ui.hyperlink_to("Visit us on GitHub", "https://github.com/alvr-org/ALVR");
-    ui.hyperlink_to("Join us on Discord", "https://discord.gg/ALVR");
+    ui.hyperlink_to("KiraVR on GitHub", "https://github.com/Daggenthal/KiraVR");
+    ui.hyperlink_to(
+        "Report a KiraVR problem",
+        "https://github.com/Daggenthal/KiraVR/issues",
+    );
     ui.hyperlink_to(
         "Latest release",
-        "https://github.com/alvr-org/ALVR/releases/latest",
+        "https://github.com/Daggenthal/KiraVR/releases/latest",
     );
+    ui.add_space(10.0);
+    // KiraVR is a fork. Credit the original project and keep its community
+    // links clearly labeled as ALVR's, not ours.
+    ui.label("KiraVR is an unofficial fork of ALVR and is not affiliated with the ALVR team.");
+    ui.hyperlink_to("ALVR on GitHub", "https://github.com/alvr-org/ALVR");
     ui.hyperlink_to(
         "Donate to ALVR on Open Collective",
         "https://opencollective.com/alvr",

@@ -8,9 +8,10 @@ use alvr_common::settings_schema::SettingsSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
-pub const PACKAGE_NAME_STORE: &str = "alvr.client";
-pub const PACKAGE_NAME_GITHUB_DEV: &str = "alvr.client.dev";
-pub const PACKAGE_NAME_GITHUB_STABLE: &str = "alvr.client.stable";
+// KiraVR uses its own app ID so it never collides with an installed ALVR.
+pub const PACKAGE_NAME_STORE: &str = "dev.daggenthal.kiravr";
+pub const PACKAGE_NAME_GITHUB_DEV: &str = "dev.daggenthal.kiravr.dev";
+pub const PACKAGE_NAME_GITHUB_STABLE: &str = "dev.daggenthal.kiravr.stable";
 
 // Platform of the device. It is used to match the VR runtime and enable features conditionally.
 #[derive(PartialEq, Eq, Clone, Copy)]

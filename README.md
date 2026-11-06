@@ -1,5 +1,16 @@
 <p align="center"> <img width="500" src="resources/ALVR-Grey.svg"/> </p>
 
+> [!IMPORTANT]
+> **This is KiraVR, an unofficial fork of [ALVR](https://github.com/alvr-org/ALVR).** 🐧
+> The goal: Keep every setting ALVR has, make it work reliably with SteamVR on Linux and SteamOS, and make setup simpler.
+> KiraVR is not affiliated with or endorsed by the ALVR team. Please report KiraVR problems [here](https://github.com/Daggenthal/KiraVR/issues), not to ALVR.
+> The Android client installs as `dev.daggenthal.kiravr` and shows up as "KiraVR", so it can sit next to an installed ALVR.
+
+> [!NOTE]
+> **AI usage:** KiraVR is developed with help from AI coding tools (Claude). Every change is reviewed and tested on real hardware before it is committed. Upstream ALVR does not accept AI-assisted contributions, so code from this fork is not sent back to ALVR.
+
+Everything below is the original ALVR README.
+
 # ALVR - Air Light VR
 
 [![badge-discord][]][link-discord] [![badge-matrix][]][link-matrix] [![badge-opencollective][]][link-opencollective]

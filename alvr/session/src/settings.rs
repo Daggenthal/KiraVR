@@ -1703,6 +1703,12 @@ pub struct PerformanceOverlayConfig {
     pub grab_range: f32,
 
     #[schema(strings(
+        display_name = "Show Pointer",
+        help = "Shows a ray from the controller that can move the panel, while the panel is visible. It turns green when it points at the panel."
+    ))]
+    pub show_pointer: bool,
+
+    #[schema(strings(
         display_name = "When Streaming Starts",
         help = "How the overlay looks when the headset connects, before the shortcut is used."
     ))]
@@ -2334,6 +2340,7 @@ pub fn session_settings_default() -> SettingsDefault {
                     },
                     size: 1.0,
                     grab_range: 1.0,
+                    show_pointer: true,
                     initial_mode: PerformanceOverlayModeDefault {
                         variant: PerformanceOverlayModeDefaultVariant::Hidden,
                     },

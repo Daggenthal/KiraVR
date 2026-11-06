@@ -4,6 +4,9 @@
 struct PushConstant {
     transform: mat4x4f,
     opacity: f32,
+    // Multiplies the texture color. White for the panel, the beam color for
+    // the pointer (drawn with a plain white texture).
+    tint: vec4f,
 }
 var<push_constant> pc: PushConstant;
 
@@ -28,5 +31,5 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
 @fragment
 fn fragment_main(@location(0) uv: vec2f) -> @location(0) vec4f {
     let color = textureSample(overlay_texture, overlay_sampler, uv);
-    return vec4f(color.rgb, color.a * pc.opacity);
+    return vec4f(color.rgb * pc.tint.rgb, color.a * pc.opacity);
 }

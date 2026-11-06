@@ -13,7 +13,7 @@ use alvr_common::{
         RIGHT_THUMBSTICK_CLICK_ID,
     },
 };
-use alvr_graphics::{OverlayAnchor, OverlayLine, OverlayRenderer};
+use alvr_graphics::{OverlayAnchor, OverlayBeam, OverlayLine, OverlayRenderer};
 use alvr_packets::{ButtonEntry, ButtonValue};
 use alvr_session::{
     CodecType, PerformanceOverlayConfig, PerformanceOverlayMode, PerformanceOverlayPosition,
@@ -50,6 +50,11 @@ const DOUBLE_GRAB: Duration = Duration::from_millis(400);
 // Where a controller points, in grip space (measured on Quest 3, see
 // default_local_pose).
 const GRIP_FORWARD: Vec3 = Vec3::NEG_Y;
+// Where the aim pose points (OpenXR aim: -Z, from the controller tip).
+const AIM_FORWARD: Vec3 = Vec3::NEG_Z;
+// Pointing within this angle of the panel's center counts as aiming at it
+// (cos 12 degrees, about 21 cm to either side at 1 m).
+const AIM_CONE_COS: f32 = 0.978;
 
 // A vibration for one controller (0 left, 1 right), for feedback when the
 // panel may be out of sight, like on the wrist.
@@ -73,6 +78,12 @@ const YELLOW: [u8; 3] = [250, 210, 90];
 const RED: [u8; 3] = [255, 110, 100];
 const WHITE: [u8; 3] = [235, 235, 240];
 const GRAY: [u8; 3] = [165, 170, 180];
+const CYAN: [u8; 3] = [120, 210, 255];
+
+const BEAM_IDLE: [f32; 3] = [0.55, 0.8, 1.0];
+const BEAM_ON_TARGET: [f32; 3] = [0.35, 0.95, 0.5];
+const HINT_AIMED: &str = "Squeeze grip to move, twice to reset";
+const HINT_HOLDING: &str = "Release to place it";
 
 // Overlay settings shared by the input and render threads, None when turned
 // off. Updated live when they change in the dashboard.
@@ -211,12 +222,17 @@ pub struct PerfOverlay {
     position: PerformanceOverlayPosition,
     size: f32,
     grab_range: f32,
+    show_pointer: bool,
+    // A how-to line shown on the panel while aiming at or holding it.
+    hint: Option<&'static str>,
     mode: PerformanceOverlayMode,
     triggers: Arc<AtomicUsize>,
     seen_triggers: usize,
     last_text: Option<Instant>,
     grips_down: Arc<[AtomicBool; 2]>,
     was_down: [bool; 2],
+    // Which controllers are close to or aiming at the panel.
+    aimed: [bool; 2],
     grab: Option<Grab>,
     last_grab_start: Option<Instant>,
     poses: OverlayPoses,
@@ -237,12 +253,15 @@ impl PerfOverlay {
             position: PerformanceOverlayPosition::LeftWrist,
             size: 1.0,
             grab_range: 1.0,
+            show_pointer: true,
+            hint: None,
             mode,
             seen_triggers: triggers.load(Ordering::Relaxed),
             triggers,
             last_text: None,
             grips_down,
             was_down: [false; 2],
+            aimed: [false; 2],
             grab: None,
             last_grab_start: None,
             poses,
@@ -269,15 +288,26 @@ impl PerfOverlay {
                 self.position = config.position;
                 self.size = config.size;
                 self.grab_range = config.grab_range;
+                self.show_pointer = config.show_pointer;
                 overlay.set_visible(self.mode != PerformanceOverlayMode::Hidden);
             }
             None => {
                 self.enabled = false;
                 self.grab = None;
                 overlay.set_visible(false);
+                overlay.set_beams(vec![]);
             }
         }
         self.last_text = None;
+    }
+
+    // Changing the hint redraws the panel right away instead of on the next
+    // text refresh.
+    fn set_hint(&mut self, hint: Option<&'static str>) {
+        if self.hint != hint {
+            self.hint = hint;
+            self.last_text = None;
+        }
     }
 
     // Vibrations queued since the last call, for the caller to play.
@@ -302,11 +332,12 @@ impl PerfOverlay {
         info: &StreamInfo,
         views: &[ViewParams; 2],
         grips: [Option<Pose>; 2],
+        aims: [Option<Pose>; 2],
     ) {
         if !self.enabled {
             return;
         }
-        self.place(overlay, core, views, grips);
+        self.place(overlay, core, views, grips, aims);
 
         let triggers = self.triggers.load(Ordering::Relaxed);
         if triggers != self.seen_triggers {
@@ -334,7 +365,11 @@ impl PerfOverlay {
             return;
         }
         self.last_text = Some(Instant::now());
-        overlay.update(&build_lines(self.mode, &core.perf_snapshot(), info));
+        let mut lines = build_lines(self.mode, &core.perf_snapshot(), info);
+        if let Some(hint) = self.hint {
+            lines.push(OverlayLine::new(hint, CYAN));
+        }
+        overlay.update(&lines);
     }
 
     // Positions the panel, and lets a controller grab and move it.
@@ -344,7 +379,15 @@ impl PerfOverlay {
         core: &ClientCoreContext,
         views: &[ViewParams; 2],
         grips: [Option<Pose>; 2],
+        aims: [Option<Pose>; 2],
     ) {
+        // The pointer of each controller: The aim pose (tip, like SteamVR's
+        // laser), or the grip if the aim is missing. Pose plus its forward.
+        let pointers = [0, 1].map(|hand| {
+            aims[hand]
+                .map(|aim| (aim, aim.orientation * AIM_FORWARD))
+                .or_else(|| grips[hand].map(|grip| (grip, grip.orientation * GRIP_FORWARD)))
+        });
         let down = [
             self.grips_down[0].load(Ordering::Relaxed),
             self.grips_down[1].load(Ordering::Relaxed),
@@ -366,7 +409,7 @@ impl PerfOverlay {
         // Held: Follow the hand, store the result when let go.
         if let Some(grab) = &self.grab {
             let hand = grab.hand;
-            if let Some(hand_pose) = grips[hand] {
+            if let Some((hand_pose, _)) = pointers[hand] {
                 let panel = pose_mat(hand_pose) * grab.hand_to_panel;
                 if down[hand] {
                     overlay.set_anchor(
@@ -376,6 +419,19 @@ impl PerfOverlay {
                         width,
                         1.0,
                     );
+                    let center = panel.w_axis.truncate();
+                    overlay.set_beams(if self.show_pointer {
+                        vec![OverlayBeam {
+                            origin: hand_pose.position,
+                            direction: center - hand_pose.position,
+                            length: hand_pose.position.distance(center),
+                            color: BEAM_ON_TARGET,
+                            opacity: 0.8,
+                        }]
+                    } else {
+                        vec![]
+                    });
+                    self.set_hint(Some(HINT_HOLDING));
                     return;
                 }
                 if let Some(parent) = parent {
@@ -392,28 +448,63 @@ impl PerfOverlay {
         let (anchor, width, opacity) = anchor_for(self.position, self.size, views, grips, custom);
         overlay.set_anchor(anchor, width, opacity);
 
-        // Grab: A grip squeezed close to the visible panel.
-        if self.mode == PerformanceOverlayMode::Hidden || opacity < 0.5 {
-            return;
-        }
+        // Grab: A grip squeezed close to the visible panel, or while pointing
+        // at it. A light tick when a controller starts aiming at it, since
+        // there is no visible ray.
         let panel = match anchor {
             OverlayAnchor::Head { pose } => pose_mat(head) * pose_mat(pose),
             OverlayAnchor::World { pose } => pose_mat(pose),
         };
-        let center = panel.w_axis.truncate();
+        let can_grab = self.mode != PerformanceOverlayMode::Hidden && opacity >= 0.5;
         for hand in 0..2 {
-            let (true, true, Some(hand_pose)) =
-                (grabbing_hands[hand], pressed_now[hand], grips[hand])
+            let aimed = can_grab
+                && grabbing_hands[hand]
+                && pointers[hand].is_some_and(|(pose, forward)| {
+                    can_reach(pose.position, forward, panel, width, self.grab_range)
+                });
+            if aimed && !self.aimed[hand] {
+                self.haptics.push(pulse(hand, 15, 0.15));
+            }
+            self.aimed[hand] = aimed;
+        }
+
+        // Visible pointers, so aiming does not have to be guessed.
+        let center = panel.w_axis.truncate();
+        let beams = (0..2)
+            .filter(|&hand| can_grab && self.show_pointer && grabbing_hands[hand])
+            .filter_map(|hand| {
+                let (hand_pose, direction) = pointers[hand]?;
+                Some(if self.aimed[hand] {
+                    OverlayBeam {
+                        origin: hand_pose.position,
+                        direction,
+                        length: hand_pose.position.distance(center),
+                        color: BEAM_ON_TARGET,
+                        opacity: 0.8,
+                    }
+                } else {
+                    OverlayBeam {
+                        origin: hand_pose.position,
+                        direction,
+                        length: self.grab_range,
+                        color: BEAM_IDLE,
+                        opacity: 0.45,
+                    }
+                })
+            })
+            .collect();
+        overlay.set_beams(beams);
+        self.set_hint(self.aimed.contains(&true).then_some(HINT_AIMED));
+
+        if !can_grab {
+            return;
+        }
+        for hand in 0..2 {
+            let (true, true, Some((hand_pose, _))) =
+                (self.aimed[hand], pressed_now[hand], pointers[hand])
             else {
                 continue;
             };
-            // Up close, or pointed at from within the grab range.
-            let pointing = hand_pose.orientation * GRIP_FORWARD;
-            if hand_pose.position.distance(center) > GRAB_RADIUS
-                && !ray_hits_panel(hand_pose.position, pointing, panel, width, self.grab_range)
-            {
-                continue;
-            }
             // Two quick grabs put it back where it started.
             if self
                 .last_grab_start
@@ -434,6 +525,25 @@ impl PerfOverlay {
             return;
         }
     }
+}
+
+// Whether a controller can grab the panel: Up close, or pointing at it from
+// within `range`. Pointing is forgiving (a cone around the panel's center)
+// because the ray is invisible and the grip axis is not exactly where a hand
+// feels it points.
+pub fn can_reach(origin: Vec3, forward: Vec3, panel: Mat4, width: f32, range: f32) -> bool {
+    let center = panel.w_axis.truncate();
+    let to_panel = center - origin;
+    let distance = to_panel.length();
+    if distance <= GRAB_RADIUS {
+        return true;
+    }
+    if distance > range {
+        return false;
+    }
+    let pointing = forward.normalize_or_zero();
+    pointing.dot(to_panel / distance) >= AIM_CONE_COS
+        || ray_hits_panel(origin, pointing, panel, width, range)
 }
 
 // Whether a ray (a controller pointing) hits the panel within `range` meters.
@@ -711,6 +821,7 @@ mod tests {
             position: PerformanceOverlayPosition::LeftWrist,
             size: 1.0,
             grab_range: 1.0,
+            show_pointer: true,
             initial_mode: PerformanceOverlayMode::Hidden,
         }
     }
@@ -863,6 +974,29 @@ mod tests {
         // Slightly off center still counts.
         let near_edge = (Vec3::new(0.12, 0.05, -2.0)).normalize();
         assert!(ray_hits_panel(Vec3::ZERO, near_edge, panel, 0.3, 3.0));
+    }
+
+    #[test]
+    fn aiming_is_forgiving_but_bounded() {
+        let panel = Mat4::from_translation(Vec3::new(0.0, 1.2, -1.0));
+        let tip = Vec3::new(0.0, 1.2, 0.0);
+        let at_center = Vec3::new(0.0, 0.0, -1.0);
+        // 8 degrees off still grabs a small wrist panel 1 m away.
+        let off_8 = Quat::from_rotation_y(8f32.to_radians()) * at_center;
+        assert!(can_reach(tip, off_8, panel, 0.11, 2.0));
+        // 20 degrees off does not.
+        let off_20 = Quat::from_rotation_y(20f32.to_radians()) * at_center;
+        assert!(!can_reach(tip, off_20, panel, 0.11, 2.0));
+        // Out of range does not, however well aimed.
+        assert!(!can_reach(tip, at_center, panel, 0.11, 0.5));
+        // Touching it with the tip always does.
+        assert!(can_reach(
+            Vec3::new(0.0, 1.2, -0.95),
+            Vec3::Z,
+            panel,
+            0.11,
+            0.5
+        ));
     }
 
     #[test]

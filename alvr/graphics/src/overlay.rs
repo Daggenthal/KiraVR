@@ -11,7 +11,11 @@ use glyph_brush_layout::{
     FontId, GlyphPositioner, HorizontalAlign, Layout, SectionGeometry, SectionText, VerticalAlign,
     ab_glyph::{Font, FontRef, ScaleFont},
 };
-use std::{cell::Cell, mem, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    mem,
+    rc::Rc,
+};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, BlendState, ColorTargetState, ColorWrites,
@@ -29,11 +33,37 @@ const LINE_HEIGHT: f32 = 42.0;
 const PADDING: f32 = 18.0;
 const BACKGROUND: [u8; 4] = [10, 10, 14, 175];
 const TRANSFORM_SIZE: u32 = mem::size_of::<Mat4>() as u32;
-// mat4x4 + f32 is 68 bytes, but WGSL rounds a struct holding a mat4x4 up to a
-// multiple of 16, and the range must cover the whole struct or wgpu rejects
-// the pipeline.
-const PUSH_CONSTANTS_SIZE: u32 =
-    (TRANSFORM_SIZE + mem::size_of::<f32>() as u32).next_multiple_of(16);
+// WGSL layout of the shader's PushConstant: transform at 0, opacity at 64,
+// tint (a vec4, aligned to 16) at 80, 96 bytes in all. The range must cover
+// the whole struct or wgpu rejects the pipeline.
+const OPACITY_OFFSET: usize = TRANSFORM_SIZE as usize;
+const TINT_OFFSET: usize = 80;
+const PUSH_CONSTANTS_SIZE: u32 = 96;
+// Pointer beam thickness in meters.
+const BEAM_WIDTH: f32 = 0.004;
+
+fn push_constants(transform: Mat4, opacity: f32, tint: [f32; 3]) -> Vec<u8> {
+    let mut bytes = vec![0u8; PUSH_CONSTANTS_SIZE as usize];
+    for (i, v) in transform.to_cols_array().iter().enumerate() {
+        bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    bytes[OPACITY_OFFSET..OPACITY_OFFSET + 4].copy_from_slice(&opacity.to_le_bytes());
+    for (i, v) in tint.iter().chain(&[1.0]).enumerate() {
+        let at = TINT_OFFSET + i * 4;
+        bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    bytes
+}
+
+// A pointer ray from a controller, in the same space as the views.
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayBeam {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub length: f32,
+    pub color: [f32; 3],
+    pub opacity: f32,
+}
 
 // Where the panel's text area is centered, set every frame.
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +94,9 @@ pub struct OverlayRenderer {
     context: Rc<GraphicsContext>,
     pipeline: RenderPipeline,
     bind_group: BindGroup,
+    // A plain white texture, tinted per beam.
+    beam_bind_group: BindGroup,
+    beams: RefCell<Vec<OverlayBeam>>,
     texture: Texture,
     font: FontRef<'static>,
     visible: Cell<bool>,
@@ -107,28 +140,52 @@ impl OverlayRenderer {
             ],
         });
 
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("overlay_bind_group"),
-            layout: &bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(
-                        &texture.create_view(&Default::default()),
-                    ),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Sampler(&device.create_sampler(
-                        &SamplerDescriptor {
-                            mag_filter: wgpu::FilterMode::Linear,
-                            min_filter: wgpu::FilterMode::Linear,
-                            ..Default::default()
-                        },
-                    )),
-                },
-            ],
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
+        let make_bind_group = |texture: &Texture| {
+            device.create_bind_group(&BindGroupDescriptor {
+                label: Some("overlay_bind_group"),
+                layout: &bind_group_layout,
+                entries: &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::TextureView(
+                            &texture.create_view(&Default::default()),
+                        ),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: BindingResource::Sampler(&sampler),
+                    },
+                ],
+            })
+        };
+        let bind_group = make_bind_group(&texture);
+
+        let white = super::create_texture(device, UVec2::new(4, 4), SDR_FORMAT);
+        context.queue.write_texture(
+            TexelCopyTextureInfo {
+                texture: &white,
+                mip_level: 0,
+                origin: Origin3d::ZERO,
+                aspect: TextureAspect::All,
+            },
+            &[255u8; 4 * 4 * 4],
+            TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * 4),
+                rows_per_image: Some(4),
+            },
+            Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+        );
+        let beam_bind_group = make_bind_group(&white);
 
         let shader = device.create_shader_module(include_wgsl!("../resources/overlay.wgsl"));
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
@@ -171,6 +228,8 @@ impl OverlayRenderer {
             context,
             pipeline,
             bind_group,
+            beam_bind_group,
+            beams: RefCell::new(vec![]),
             texture,
             font: FontRef::try_from_slice(include_bytes!("../resources/Ubuntu-Medium.ttf"))
                 .unwrap(),
@@ -189,6 +248,11 @@ impl OverlayRenderer {
 
     pub fn set_visible(&self, visible: bool) {
         self.visible.set(visible);
+    }
+
+    // Pointer rays to draw this frame, replacing the previous ones.
+    pub fn set_beams(&self, beams: Vec<OverlayBeam>) {
+        *self.beams.borrow_mut() = beams;
     }
 
     // Call every frame before rendering, a wrist anchor moves with the hand.
@@ -233,6 +297,34 @@ impl OverlayRenderer {
         views: &[StreamViewParams; 2],
         view_idx: usize,
     ) {
+        let eye = views[view_idx].output_view_params;
+        let eye_mat = Mat4::from_rotation_translation(eye.pose.orientation, eye.pose.position);
+        let view_proj = super::projection_from_fov(eye.fov) * eye_mat.inverse();
+
+        pass.set_pipeline(&self.pipeline);
+
+        // Beams: Thin strips along the ray, turned to face this eye.
+        pass.set_bind_group(0, &self.beam_bind_group, &[]);
+        for beam in self.beams.borrow().iter() {
+            let up = beam.direction.normalize_or_zero();
+            let middle = beam.origin + up * (beam.length / 2.0);
+            let to_eye = (eye.pose.position - middle).normalize_or_zero();
+            let right = up.cross(to_eye).normalize_or_zero();
+            if up == Vec3::ZERO || right == Vec3::ZERO || beam.length <= 0.0 {
+                continue;
+            }
+            let facing = right.cross(up);
+            let model = Mat4::from_cols(
+                (right * BEAM_WIDTH).extend(0.0),
+                (up * beam.length).extend(0.0),
+                facing.extend(0.0),
+                middle.extend(1.0),
+            );
+            let bytes = push_constants(view_proj * model, beam.opacity, beam.color);
+            pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 0, &bytes);
+            pass.draw(0..4, 0..1);
+        }
+
         if !self.visible.get() || self.used_fraction.get() <= 0.0 || self.opacity.get() <= 0.0 {
             return;
         }
@@ -261,18 +353,8 @@ impl OverlayRenderer {
             * Mat4::from_translation(Vec3::new(0.0, (used_height - panel_height) / 2.0, 0.0))
             * Mat4::from_scale(Vec3::new(width, panel_height, 1.0));
 
-        let eye = views[view_idx].output_view_params;
-        let eye_mat = Mat4::from_rotation_translation(eye.pose.orientation, eye.pose.position);
-        let transform = super::projection_from_fov(eye.fov) * eye_mat.inverse() * model;
+        let bytes = push_constants(view_proj * model, self.opacity.get(), [1.0; 3]);
 
-        let mut bytes = transform
-            .to_cols_array()
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect::<Vec<u8>>();
-        bytes.extend_from_slice(&self.opacity.get().to_le_bytes());
-
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_push_constants(ShaderStages::VERTEX_FRAGMENT, 0, &bytes);
         pass.draw(0..4, 0..1);
@@ -366,6 +448,18 @@ mod tests {
         // Below the panel stays transparent.
         let below = &buffer[(used as usize + 1) * TEXTURE_WIDTH as usize * 4..];
         assert!(below.iter().all(|b| *b == 0));
+    }
+
+    // Must match the WGSL PushConstant layout, or colors and opacity come out
+    // wrong only on the headset.
+    #[test]
+    fn push_constant_layout_matches_the_shader() {
+        let bytes = push_constants(Mat4::IDENTITY, 0.5, [0.25, 0.75, 1.0]);
+        assert_eq!(bytes.len(), 96);
+        let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        assert_eq!(f(0), 1.0, "transform first column");
+        assert_eq!(f(64), 0.5, "opacity");
+        assert_eq!([f(80), f(84), f(88), f(92)], [0.25, 0.75, 1.0, 1.0], "tint");
     }
 
     #[test]

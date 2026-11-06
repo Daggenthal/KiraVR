@@ -113,6 +113,8 @@ pub struct StreamContext {
     // Raw controller grip poses (stage space) from the input thread. Locating
     // the grip space from the render thread came back invalid every frame.
     perf_overlay_grip_poses: Arc<alvr_common::parking_lot::Mutex<[Option<Pose>; 2]>>,
+    // Aim poses (pointer origin at the controller tip, -Z forward).
+    perf_overlay_aim_poses: Arc<alvr_common::parking_lot::Mutex<[Option<Pose>; 2]>>,
 }
 
 impl StreamContext {
@@ -263,6 +265,7 @@ impl StreamContext {
             perf_overlay_config: Arc::new(alvr_common::parking_lot::Mutex::new(None)),
             perf_overlay_triggers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             perf_overlay_grip_poses: Arc::new(alvr_common::parking_lot::Mutex::new([None; 2])),
+            perf_overlay_aim_poses: Arc::new(alvr_common::parking_lot::Mutex::new([None; 2])),
             perf_overlay_grips: Arc::new([
                 std::sync::atomic::AtomicBool::new(false),
                 std::sync::atomic::AtomicBool::new(false),
@@ -323,6 +326,7 @@ impl StreamContext {
             let refresh_rate = self.config.refresh_rate_hint;
             let running = Arc::clone(&self.input_thread_running);
             let grip_poses = Arc::clone(&self.perf_overlay_grip_poses);
+            let aim_poses = Arc::clone(&self.perf_overlay_aim_poses);
             let shortcut = Some(crate::perf_overlay::ShortcutDetector::new(
                 Arc::clone(&self.perf_overlay_config),
                 Arc::clone(&self.perf_overlay_triggers),
@@ -339,6 +343,7 @@ impl StreamContext {
                     running,
                     shortcut,
                     grip_poses,
+                    aim_poses,
                 )
             }
         }));
@@ -491,12 +496,14 @@ impl StreamContext {
                 wired: self.config.wired,
             };
             let grips = *self.perf_overlay_grip_poses.lock();
+            let aims = *self.perf_overlay_aim_poses.lock();
             overlay.frame(
                 self.renderer.overlay(),
                 &self.core_context,
                 &info,
                 &output_view_params,
                 grips,
+                aims,
             );
 
             let interaction = self.interaction_context.read();
@@ -621,6 +628,7 @@ fn stream_input_loop(
     running: Arc<RelaxedAtomic>,
     mut shortcut: Option<crate::perf_overlay::ShortcutDetector>,
     grip_poses: Arc<alvr_common::parking_lot::Mutex<[Option<Pose>; 2]>>,
+    aim_poses: Arc<alvr_common::parking_lot::Mutex<[Option<Pose>; 2]>>,
 ) {
     let mut last_controller_poses = [Pose::IDENTITY; 2];
     let mut last_palm_poses = [Pose::IDENTITY; 2];
@@ -696,6 +704,27 @@ fn stream_input_loop(
                 .grip_motion
                 .map(|_| last_controller_poses[1]),
         ];
+        *aim_poses.lock() = [0, 1].map(|hand| {
+            let source = &int_ctx.hands_interaction[hand];
+            if !source
+                .aim_action
+                .is_active(&xr_session, xr::Path::NULL)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            let location = source
+                .aim_space
+                .locate(stage_reference_space, crate::to_xr_time(now))
+                .ok()?;
+            location
+                .location_flags
+                .contains(
+                    xr::SpaceLocationFlags::POSITION_VALID
+                        | xr::SpaceLocationFlags::ORIENTATION_VALID,
+                )
+                .then(|| crate::from_xr_pose(location.pose))
+        });
 
         // Note: When multimodal input is enabled, we are sure that when free hands are used
         // (not holding controllers) the controller data is None.

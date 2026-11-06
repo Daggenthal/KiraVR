@@ -103,9 +103,8 @@ pub struct HandInteraction {
     pub grip_action: xr::Action<xr::Posef>,
     pub grip_space: xr::Space,
 
-    #[expect(dead_code)]
+    // KiraVR: Used for the overlay's pointer, which starts at the tip.
     pub aim_action: xr::Action<xr::Posef>,
-    #[expect(dead_code)]
     pub aim_space: xr::Space,
 
     pub detached_grip_action: Option<xr::Action<xr::Posef>>,

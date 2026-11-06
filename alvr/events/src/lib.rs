@@ -127,7 +127,24 @@ impl Event {
             EventType::Log(log_entry) => log_entry.content.clone(),
             EventType::DebugGroup { message, .. } => message.clone(),
             EventType::Session(_) => "Updated".into(),
-            EventType::StatisticsSummary(_) | EventType::GraphStatistics(_) => "".into(),
+            // KiraVR: Readable once-per-second summary for the session log,
+            // which used to show empty [STATS] lines.
+            EventType::StatisticsSummary(s) => format!(
+                "Video {:.1} Mbps, {} packets/s, latency {:.1} ms (network {:.1}, encode {:.1}, decode {:.1}), \
+                fps streamer {} headset {}, headset battery {}%{}",
+                s.video_mbits_per_sec,
+                s.video_packets_per_sec,
+                s.total_latency_ms,
+                s.network_latency_ms,
+                s.encode_latency_ms,
+                s.decode_latency_ms,
+                s.server_fps,
+                s.client_fps,
+                s.battery_hmd,
+                if s.hmd_plugged { " (charging)" } else { "" }
+            ),
+            // Per-frame data for the dashboard graph, kept out of text output.
+            EventType::GraphStatistics(_) => "".into(),
             EventType::Tracking(tracking) => serde_json::to_string(tracking).unwrap(),
             EventType::Buttons(buttons) => serde_json::to_string(buttons).unwrap(),
             EventType::Haptics(haptics) => serde_json::to_string(haptics).unwrap(),

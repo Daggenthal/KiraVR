@@ -67,14 +67,23 @@ pub fn init_logging(session_log_path: Option<PathBuf>, crash_log_path: Option<Pa
     }
 
     log_dispatch = if let Some(path) = session_log_path {
-        log_dispatch.chain(
+        // KiraVR: Graph events fire every frame and carry nothing readable, so
+        // they stay out of the file (the dashboard still gets them above).
+        let file = alvr_common::parking_lot::Mutex::new(
             fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .open(path)
                 .unwrap(),
-        )
+        );
+        log_dispatch.chain(fern::Output::call(move |record| {
+            use std::io::Write;
+            let line = record.args().to_string();
+            if !line.contains(" [GRAPH] ") {
+                writeln!(file.lock(), "{line}").ok();
+            }
+        }))
     } else if cfg!(target_os = "linux") {
         // this sink is required to make sure all log gets processed and forwarded to the websocket
         log_dispatch.chain(

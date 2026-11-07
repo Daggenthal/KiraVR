@@ -325,8 +325,9 @@ pub fn start_health_monitor() {
                 if since.elapsed() > Duration::from_secs(8) && !repair_pending {
                     warn!("vrserver is running without vrmonitor (started by Steam on its own)");
                     set_status(Some(
-                        "SteamVR was started without its window (Steam restarted it by itself). \
-                         It closes on its own shortly, then KiraVR starts it again properly.",
+                        "SteamVR started without its window. Steam restarted it by itself after \
+                         Steam itself restarted. That copy closes on its own within about 30 s, \
+                         then KiraVR starts SteamVR again the normal way.",
                     ));
                     repair_pending = true;
                 }

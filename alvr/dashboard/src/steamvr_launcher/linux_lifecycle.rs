@@ -252,7 +252,7 @@ pub fn careful_launch(set_status: &dyn Fn(Option<&str>)) {
         // Steam starts SteamVR by itself when it was running at Steam's last
         // exit. Give it the chance, so SteamVR is not started twice.
         set_status(Some(
-            "Steam is up, checking whether it starts SteamVR by itself...",
+            "Waiting to see if Steam starts SteamVR. Steam starts it by itself when it was running before, so KiraVR does not start a second copy.",
         ));
         if wait_for(Duration::from_secs(15), |s| {
             !s.steamvr_app.is_empty() || !s.vrserver.is_empty()

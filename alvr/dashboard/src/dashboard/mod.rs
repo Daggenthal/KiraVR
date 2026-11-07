@@ -301,15 +301,13 @@ impl eframe::App for Dashboard {
                                     self.restart_game_confirm = None;
                                     self.restart_steamvr(&mut requests);
                                 }
-                                Frame::new().inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{game} is running. Quit it first, restarting SteamVR kills it."
-                                        ))
-                                        .size(12.0)
-                                        .color(theme::log_colors::WARNING_LIGHT),
-                                    );
-                                });
+                                sidebar_note(
+                                    ui,
+                                    &format!(
+                                        "{game} is running. Quit it first, restarting SteamVR kills it."
+                                    ),
+                                    |_| (),
+                                );
                             } else if connected_to_server {
                                 if ui.add_enabled(!busy, Button::new("Restart SteamVR")).clicked() {
                                     match crate::steamvr_launcher::running_game() {
@@ -327,31 +325,21 @@ impl eframe::App for Dashboard {
                                 crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
                             }
                             if let Some(status) = crate::steamvr_launcher::status() {
-                                Frame::new().inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
-                                    ui.vertical(|ui| {
-                                        ui.label(
-                                            RichText::new(status)
-                                                .size(12.0)
-                                                .color(theme::log_colors::WARNING_LIGHT),
+                                sidebar_note(ui, &status, |ui| {
+                                    // Waits end early once everything is ready, so this
+                                    // is the longest it can take.
+                                    if let Some((elapsed, total)) =
+                                        crate::steamvr_launcher::wait_progress()
+                                    {
+                                        let left = total.saturating_sub(elapsed).as_secs();
+                                        ui.add(
+                                            egui::ProgressBar::new(
+                                                elapsed.as_secs_f32() / total.as_secs_f32(),
+                                            )
+                                            .desired_height(14.0)
+                                            .text(RichText::new(format!("up to {left} s")).size(11.0)),
                                         );
-                                        // Waits end early once everything is ready, so this
-                                        // is the longest it can take.
-                                        if let Some((elapsed, total)) =
-                                            crate::steamvr_launcher::wait_progress()
-                                        {
-                                            let left = total.saturating_sub(elapsed).as_secs();
-                                            ui.add(
-                                                egui::ProgressBar::new(
-                                                    elapsed.as_secs_f32() / total.as_secs_f32(),
-                                                )
-                                                .desired_height(14.0)
-                                                .text(
-                                                    RichText::new(format!("up to {left} s"))
-                                                        .size(11.0),
-                                                ),
-                                            );
-                                        }
-                                    });
+                                    }
                                 });
                                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                             }
@@ -457,5 +445,58 @@ impl eframe::App for Dashboard {
         {
             shutdown_alvr();
         }
+    }
+}
+
+// KiraVR: A message under the SteamVR status. The sidebar is narrow and its
+// bottom part grows upward, so a long text used to run over the tab list.
+// Only the first sentence is shown, the whole text on hover, and the height
+// never exceeds the free space.
+#[cfg(not(target_arch = "wasm32"))]
+fn sidebar_note(ui: &mut Ui, text: &str, extra: impl FnOnce(&mut Ui)) {
+    let short = first_sentence(text);
+    let room = (ui.available_height() - 60.0).max(28.0);
+    Frame::new()
+        .inner_margin(Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                egui::ScrollArea::vertical()
+                    // Per message: Two notes can show at once.
+                    .id_salt(("sidebar_note", short))
+                    .max_height(room)
+                    .show(ui, |ui| {
+                        let label = ui.label(
+                            RichText::new(short)
+                                .size(12.0)
+                                .color(theme::log_colors::WARNING_LIGHT),
+                        );
+                        if short.len() < text.len() {
+                            label.on_hover_text(text);
+                        }
+                    });
+                extra(ui);
+            });
+        });
+}
+
+// "SteamVR started without its window." from a longer message.
+fn first_sentence(text: &str) -> &str {
+    match text.find(". ") {
+        Some(end) => &text[..=end],
+        None => text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::first_sentence;
+
+    #[test]
+    fn keeps_the_first_sentence() {
+        assert_eq!(
+            first_sentence("SteamVR started without its window. It closes shortly."),
+            "SteamVR started without its window."
+        );
+        assert_eq!(first_sentence("Starting Steam..."), "Starting Steam...");
     }
 }

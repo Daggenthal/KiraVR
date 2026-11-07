@@ -212,12 +212,56 @@ pub fn list_devices(adb_path: &str) -> Result<Vec<Device>> {
 ///////////
 // Packages
 
+// KiraVR: Checks adb's answer. adb install can exit with "Failure [...]",
+// which was reported as success before.
 pub fn install_package(adb_path: &str, device_serial: &str, apk_path: &str) -> Result<()> {
-    get_command(adb_path, &["-s", device_serial, "install", "-r", apk_path])
+    let output = get_command(adb_path, &["-s", device_serial, "install", "-r", apk_path])
         .output()
         .context(format!("Failed to install {apk_path}"))?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() && text.contains("Success") {
+        return Ok(());
+    }
+    let reason = text
+        .lines()
+        .find(|l| l.contains("Failure") || l.contains("failed") || l.contains("error"))
+        .unwrap_or(text.trim())
+        .trim()
+        .to_owned();
+    anyhow::bail!("{reason}")
+}
 
-    Ok(())
+// KiraVR: The installed app's versionName, None if it is not installed.
+pub fn installed_version(
+    adb_path: &str,
+    device_serial: &str,
+    application_id: &str,
+) -> Result<Option<String>> {
+    let output = get_command(
+        adb_path,
+        &[
+            "-s",
+            device_serial,
+            "shell",
+            "dumpsys",
+            "package",
+            application_id,
+        ],
+    )
+    .output()
+    .context("Failed to read the installed version")?;
+    Ok(parse_version_name(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_version_name(dumpsys: &str) -> Option<String> {
+    dumpsys
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("versionName="))
+        .map(|v| v.trim().to_owned())
 }
 
 pub fn is_package_installed(
@@ -346,4 +390,16 @@ pub fn kill_server(adb_path: &str) -> Result<()> {
         .context("Failed to kill ADB server")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_version_name_from_dumpsys() {
+        let dumpsys = "Packages:\n  Package [dev.daggenthal.kiravr.dev] (abc):\n    versionCode=18153472 minSdk=28 targetSdk=32\n    versionName=21.0.0-dev14\n    splits=[base]\n";
+        assert_eq!(parse_version_name(dumpsys).as_deref(), Some("21.0.0-dev14"));
+        assert_eq!(parse_version_name("Unable to find package: x\n"), None);
+    }
 }

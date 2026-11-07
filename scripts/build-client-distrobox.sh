@@ -80,6 +80,7 @@ in_box "cargo xtask build-client $PROFILE"
 APK="$(ls -t "$KIRAVR_REPO_DIR"/build/alvr_client_android/*.apk 2>/dev/null | head -1)"
 [[ -n "$APK" ]] || { error "Build finished but no APK found in build/alvr_client_android"; exit 1; }
 ok "Client built: $APK"
+bundle_client_apk
 
 if [[ "$INSTALL" == "1" ]]; then
     command -v adb >/dev/null || { error "adb not found on the host"; exit 1; }

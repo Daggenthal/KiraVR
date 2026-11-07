@@ -18,6 +18,8 @@ pub struct InstallationTab {
     last_update_instant: Instant,
     #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
     system_check: SystemCheck,
+    #[cfg(not(target_arch = "wasm32"))]
+    headset_app: crate::headset_app::HeadsetApp,
 }
 
 impl InstallationTab {
@@ -27,6 +29,8 @@ impl InstallationTab {
             last_update_instant: Instant::now(),
             #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
             system_check: SystemCheck::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            headset_app: Default::default(),
         }
     }
 
@@ -54,6 +58,9 @@ impl InstallationTab {
             .show(ui, |ui| {
                 #[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
                 self.system_check.ui(ui);
+
+                #[cfg(not(target_arch = "wasm32"))]
+                headset_app_ui(&self.headset_app, ui);
 
                 ui.vertical_centered_justified(|ui| {
                     if ui.button("Run setup wizard").clicked() {
@@ -109,6 +116,123 @@ impl InstallationTab {
 
         requests
     }
+}
+
+// KiraVR: "Headset App" section: Shows what is connected over USB and
+// installs the app bundled with this streamer.
+#[cfg(not(target_arch = "wasm32"))]
+fn headset_app_ui(app: &crate::headset_app::HeadsetApp, ui: &mut Ui) {
+    use crate::headset_app::{HeadsetState, Job, bundled_version};
+    use alvr_gui_common::theme::log_colors;
+    use eframe::egui::{Button, ProgressBar};
+
+    app.poll(ui.ctx());
+    let job = app.job();
+    let working = matches!(job, Job::Working { .. });
+    if working {
+        ui.ctx().request_repaint_after(Duration::from_millis(200));
+    } else {
+        // Notice plugging in and out without user input.
+        ui.ctx().request_repaint_after(Duration::from_secs(3));
+    }
+    let bundled = bundled_version();
+    let has_apk = app.bundled_apk_exists();
+
+    Frame::group(ui.style())
+        .fill(theme::SECTION_BG)
+        .inner_margin(theme::FRAME_PADDING)
+        .show(ui, |ui| {
+            ui.vertical_centered_justified(|ui| {
+                ui.label(RichText::new("Headset App").size(18.0));
+            });
+            ui.add_space(4.0);
+
+            let (status, color, can_install, button) = match app.state() {
+                None => ("Looking for a headset...".to_owned(), theme::FG, false, "Install on Headset"),
+                Some(HeadsetState::NoAdb) => (
+                    "Connect the headset with a USB cable. adb is downloaded on the first install."
+                        .to_owned(),
+                    theme::FG,
+                    true,
+                    "Install on Headset",
+                ),
+                Some(HeadsetState::NotConnected) => (
+                    "No headset found. Connect it with a USB cable and turn on developer mode."
+                        .to_owned(),
+                    log_colors::WARNING_LIGHT,
+                    false,
+                    "Install on Headset",
+                ),
+                Some(HeadsetState::Unauthorized) => (
+                    "Put on the headset and allow USB debugging for this PC.".to_owned(),
+                    log_colors::WARNING_LIGHT,
+                    false,
+                    "Install on Headset",
+                ),
+                Some(HeadsetState::Connected {
+                    model,
+                    installed_version: None,
+                }) => (
+                    format!("{model} connected, KiraVR is not installed."),
+                    theme::FG,
+                    true,
+                    "Install on Headset",
+                ),
+                Some(HeadsetState::Connected {
+                    model,
+                    installed_version: Some(installed),
+                }) if installed == bundled => (
+                    format!("{model} connected, KiraVR v{installed} is up to date."),
+                    theme::OK_GREEN,
+                    true,
+                    "Reinstall",
+                ),
+                Some(HeadsetState::Connected {
+                    model,
+                    installed_version: Some(installed),
+                }) => (
+                    format!("{model} connected, has v{installed}, this streamer is v{bundled}. They must match."),
+                    log_colors::WARNING_LIGHT,
+                    true,
+                    "Update Headset App",
+                ),
+            };
+            ui.label(RichText::new(status).color(color));
+
+            if !has_apk {
+                ui.label(
+                    RichText::new("This build has no headset app bundled.")
+                        .color(log_colors::WARNING_LIGHT),
+                );
+            }
+
+            ui.add_space(4.0);
+            let label = if working { "Installing..." } else { button };
+            if ui
+                .add_enabled(can_install && has_apk && !working, Button::new(label))
+                .clicked()
+            {
+                app.install(ui.ctx());
+            }
+
+            match job {
+                Job::Idle => (),
+                Job::Working { message, progress } => {
+                    ui.add(
+                        ProgressBar::new(progress.unwrap_or(0.0))
+                            .text(message)
+                            .animate(progress.is_none()),
+                    );
+                }
+                Job::Done(message) => {
+                    ui.label(RichText::new(message).color(theme::OK_GREEN));
+                }
+                Job::Failed(message) => {
+                    ui.label(RichText::new(message).color(log_colors::ERROR_LIGHT));
+                }
+            }
+        });
+    ui.add_space(6.0);
 }
 
 // KiraVR: The preflight results, with a fix button where one exists. Checks

@@ -84,3 +84,22 @@ kiravr_ensure_box() {
     fi
     ok "rustup available"
 }
+
+# Copies the newest headset APK into the streamer build, where the dashboard's
+# "Install on Headset" looks for it. Call after either build.
+bundle_client_apk() {
+    local streamer="$KIRAVR_REPO_DIR/build/alvr_streamer_linux"
+    local apk
+    apk="$(ls -t "$KIRAVR_REPO_DIR"/build/alvr_client_android/*.apk 2>/dev/null | head -1)"
+    if [[ ! -d "$streamer" ]]; then
+        info "No streamer build yet, skipping the APK bundle"
+        return 0
+    fi
+    if [[ -z "$apk" ]]; then
+        warn "No headset APK built yet: \"Install on Headset\" stays off until scripts/build-client-distrobox.sh runs"
+        return 0
+    fi
+    mkdir -p "$streamer/share/alvr"
+    cp "$apk" "$streamer/share/alvr/kiravr_client.apk"
+    ok "Headset app bundled with the streamer ($(basename "$apk"))"
+}

@@ -1,5 +1,5 @@
 pub mod commands;
-mod parse;
+pub mod parse;
 
 use alvr_common::anyhow::Result;
 use alvr_common::{dbg_connection, error, warn};

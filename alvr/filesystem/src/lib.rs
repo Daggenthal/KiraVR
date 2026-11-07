@@ -174,6 +174,12 @@ impl Layout {
         self.executables_dir.join(dashboard_fname())
     }
 
+    // KiraVR: The headset app shipped with the streamer, for "Install on
+    // Headset" in the dashboard.
+    pub fn client_apk(&self) -> PathBuf {
+        self.static_resources_dir.join("kiravr_client.apk")
+    }
+
     pub fn local_adb_exe(&self) -> PathBuf {
         self.executables_dir
             .join("platform-tools")

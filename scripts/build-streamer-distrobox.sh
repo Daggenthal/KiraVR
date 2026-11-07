@@ -61,3 +61,4 @@ fi
 info "Building the streamer ${PROFILE:-(debug profile)}"
 in_box "cargo xtask build-streamer $PROFILE"
 ok "Streamer built: $KIRAVR_REPO_DIR/build/alvr_streamer_linux"
+bundle_client_apk

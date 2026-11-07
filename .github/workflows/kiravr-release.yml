@@ -170,9 +170,19 @@ jobs:
         with:
           key: windows
 
-      - uses: crazy-max/ghaction-chocolatey@v4
-        with:
-          args: install zip unzip pkgconfiglite
+      # The Chocolatey feed has outages (a 503 once made this pass with nothing
+      # installed and fail 15 minutes later), so retry and check the result.
+      - name: Install zip tools
+        shell: pwsh
+        run: |
+          for ($try = 1; $try -le 5; $try++) {
+            choco install zip unzip pkgconfiglite --no-progress -y
+            if (Get-Command zip -ErrorAction SilentlyContinue) { exit 0 }
+            Write-Host "zip is not there yet (try $try of 5), waiting..."
+            Start-Sleep -Seconds (30 * $try)
+          }
+          Write-Error "zip is still missing after 5 tries. The Chocolatey feed is probably down, run the workflow again later."
+          exit 1
 
       - name: Build the streamer
         run: cargo xtask package-streamer --gpl --ci

@@ -397,6 +397,8 @@ fn pc_lines() -> Vec<(String, String)> {
     use sysinfo::System;
 
     let mut lines = vec![];
+    // Only Linux appends to it.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut os = System::long_os_version().unwrap_or_else(|| "Unknown".into());
     #[cfg(target_os = "linux")]
     if let Ok(release) = fs::read_to_string("/etc/os-release") {

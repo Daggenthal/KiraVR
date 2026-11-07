@@ -7,9 +7,17 @@
 # and the dashboard runs from there. It registers that copy with SteamVR when
 # it launches SteamVR.
 #
-#   KiraVR.AppImage [dashboard args]   Install or update, then open the dashboard
+#   KiraVR.AppImage [dashboard args]   Install (first time) and open the dashboard
 #   KiraVR.AppImage --preflight [--fix]  Same, runs the system check in the terminal
+#   KiraVR.AppImage --diagnostics      Prints a bug report, personal details removed
+#   KiraVR.AppImage --update           Ask again about a version you said no to
+#   KiraVR.AppImage --rollback         Switch back to the last kept version
 #   KiraVR.AppImage --uninstall        Remove the installed copy and menu entry
+#
+# Updates are never silent: When this AppImage holds a different version than
+# the installed one, it asks twice. Saying no keeps the installed version and
+# is remembered for this build. Replaced versions are kept (newest 3) in
+# versions/, the dashboard's Installation tab can switch back to them.
 #
 # Env: KIRAVR_DEBUG=1 logs every step, NO_COLOR=1 disables colors,
 # KIRAVR_NO_DESKTOP_ENTRY=1 skips the menu entry.
@@ -47,6 +55,10 @@ INSTALL="$INSTALL_ROOT/streamer"
 DESKTOP_FILE="$DATA_HOME/applications/dev.daggenthal.kiravr.desktop"
 ICON_FILE="$DATA_HOME/icons/hicolor/256x256/apps/dev.daggenthal.kiravr.png"
 DRIVER_DIR="$INSTALL/lib64/alvr"
+VERSIONS="$INSTALL_ROOT/versions"
+DECLINED="$INSTALL_ROOT/declined-build-id"
+KEEP_VERSIONS=3
+FORCE_ASK=0
 
 find_vrpathreg() {
     local candidate
@@ -71,14 +83,78 @@ uninstall() {
     else
         warn "SteamVR not found, skipped unregistering the driver"
     fi
-    rm -rf "$INSTALL" "$INSTALL.new" "$INSTALL.old"
+    rm -rf "$INSTALL" "$INSTALL.new" "$INSTALL.old" "$VERSIONS" "$INSTALL_ROOT/rollback.tmp"
+    rm -f "$DECLINED"
     rm -f "$DESKTOP_FILE" "$ICON_FILE"
     command -v update-desktop-database >/dev/null && update-desktop-database "$DATA_HOME/applications" 2>/dev/null
     ok "Uninstalled. Settings stay in ~/.config/alvr, delete that folder too for a clean slate."
     exit 0
 }
 
-# Copies the streamer out of the AppImage when it holds a different build.
+# Yes/no question: A desktop dialog, the terminal, or no (the safe answer)
+# when neither is there. ask <question> <yes label> <no label>
+ask() {
+    local question="$1" yes="$2" no="$3"
+    if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v kdialog >/dev/null; then
+        kdialog --title "KiraVR" --yes-label "$yes" --no-label "$no" --yesno "$question" 2>/dev/null
+        return
+    fi
+    if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] && command -v zenity >/dev/null; then
+        zenity --question --title="KiraVR" --ok-label="$yes" --cancel-label="$no" --width=420 --text="$question" 2>/dev/null
+        return
+    fi
+    if [[ -t 0 ]]; then
+        local answer
+        printf '%s\n%s [y/N] ' "$question" "$yes?" >&2
+        read -r answer
+        [[ "$answer" == [yY]* ]]
+        return
+    fi
+    warn "Cannot ask (no dialog program and no terminal), keeping the installed version."
+    return 1
+}
+
+# Moves the active copy into versions/ and keeps only the newest few.
+park_active() {
+    local version id
+    version="$(cat "$INSTALL/kiravr-version" 2>/dev/null || echo unknown)"
+    id="$(cat "$INSTALL/kiravr-build-id" 2>/dev/null || echo unknown)"
+    mkdir -p "$VERSIONS"
+    rm -rf "${VERSIONS:?}/$version-$id"
+    mv "$INSTALL" "$VERSIONS/$version-$id" || die "Cannot move the current version aside"
+    touch "$VERSIONS/$version-$id"
+    ls -1dt "$VERSIONS"/*/ 2>/dev/null | tail -n +$((KEEP_VERSIONS + 1)) | while read -r old; do
+        debug "Removing old version $old"
+        rm -rf "$old"
+    done
+}
+
+# Switches to the newest kept version, after asking twice.
+rollback() {
+    local target current
+    target="$(ls -1dt "$VERSIONS"/*/ 2>/dev/null | head -1)"
+    target="${target%/}"
+    [[ -n "$target" && -f "$target/kiravr-version" ]] || die "No older version is kept, nothing to go back to."
+    current="$(cat "$INSTALL/kiravr-version" 2>/dev/null || echo unknown)"
+    local old
+    old="$(cat "$target/kiravr-version")"
+    pgrep -x vrserver >/dev/null && die "SteamVR is running. Close it first, it uses the current version's driver."
+    ask "Switch KiraVR from $current back to $old?" "Continue" "Keep $current" || { info "Kept $current"; return 0; }
+    ask "Are you sure? KiraVR $current is kept, so you can switch back in the dashboard (Installation, Updates)." "Switch to $old" "Cancel" \
+        || { info "Kept $current"; return 0; }
+    local current_id
+    current_id="$(cat "$INSTALL/kiravr-build-id" 2>/dev/null || true)"
+    local staged="$INSTALL_ROOT/rollback.tmp"
+    rm -rf "$staged"
+    mv "$target" "$staged" || die "Cannot prepare $old"
+    park_active
+    mv "$staged" "$INSTALL" || die "Cannot activate $old"
+    [[ -n "$current_id" ]] && echo "$current_id" > "$DECLINED"
+    ok "Switched to KiraVR $old"
+}
+
+# Copies the streamer out of the AppImage. The first install just happens,
+# replacing an installed version is asked twice.
 install_streamer() {
     local wanted installed=""
     wanted="$(cat "$PAYLOAD/kiravr-build-id")" || die "This AppImage is damaged (no build id)."
@@ -89,17 +165,46 @@ install_streamer() {
         return 0
     fi
 
-    info "Installing KiraVR $(cat "$PAYLOAD/kiravr-version") to $INSTALL"
+    local new_version old_version=""
+    new_version="$(cat "$PAYLOAD/kiravr-version")"
+    if [[ -n "$installed" ]]; then
+        old_version="$(cat "$INSTALL/kiravr-version" 2>/dev/null || echo unknown)"
+        if [[ "$FORCE_ASK" != "1" && -f "$DECLINED" && "$(cat "$DECLINED")" == "$wanted" ]]; then
+            info "Starting the installed KiraVR $old_version. You said no to $new_version before, run with --update to be asked again."
+            return 0
+        fi
+        local question="Update KiraVR from $old_version to $new_version?"
+        if [[ "$new_version" == "$old_version" ]]; then
+            question="Replace KiraVR $old_version with a different build of $new_version?"
+        elif [[ "$old_version" == 2[0-9].* ]]; then
+            # Builds before 1.0.0 carried ALVR's version numbers (21.0.0-dev14).
+            question="Update KiraVR from $old_version (old numbering) to $new_version?"
+        elif [[ "$(printf '%s\n%s\n' "$new_version" "$old_version" | sort -V | head -1)" == "$new_version" ]]; then
+            question="Go back from KiraVR $old_version to the older $new_version?"
+        fi
+        if ! ask "$question
+
+This AppImage holds KiraVR $new_version, the installed version is $old_version. KiraVR only changes when you say so." \
+            "Continue" "Keep $old_version" \
+            || ! ask "Are you sure? KiraVR $new_version is installed now and $old_version is kept, so you can switch back in the dashboard (Installation, Updates). The headset app needs the matching version afterwards." \
+            "Install $new_version" "Cancel"; then
+            echo "$wanted" > "$DECLINED"
+            info "Kept KiraVR $old_version"
+            return 0
+        fi
+    fi
+
+    info "Installing KiraVR $new_version to $INSTALL"
     mkdir -p "$INSTALL_ROOT" || die "Cannot create $INSTALL_ROOT"
     rm -rf "$INSTALL.new" "$INSTALL.old"
     cp -a "$PAYLOAD" "$INSTALL.new" || { rm -rf "$INSTALL.new"; die "Copying to $INSTALL_ROOT failed (disk full?)"; }
     # Swap whole folders. A running vrserver keeps its already loaded driver,
     # copying over a loaded .so would crash it.
     if [[ -d "$INSTALL" ]]; then
-        mv "$INSTALL" "$INSTALL.old" || die "Cannot replace $INSTALL"
+        park_active
     fi
     mv "$INSTALL.new" "$INSTALL" || die "Cannot move the new copy into place"
-    rm -rf "$INSTALL.old"
+    rm -f "$DECLINED"
     if pgrep -x vrserver >/dev/null; then
         warn "SteamVR is running the previous build. Restart SteamVR to use this one."
     fi
@@ -126,16 +231,28 @@ desktop_entry() {
     ok "Added KiraVR to the application menu"
 }
 
+ROLLBACK=0
+DASHBOARD_ARGS=()
 for arg in "$@"; do
-    [[ "$arg" == "--uninstall" ]] && uninstall
+    case "$arg" in
+        --uninstall) uninstall ;;
+        --update) FORCE_ASK=1 ;;
+        --rollback) ROLLBACK=1 ;;
+        *) DASHBOARD_ARGS+=("$arg") ;;
+    esac
 done
 
 [[ "$(uname -m)" == "x86_64" ]] || die "KiraVR needs an x86_64 PC, this is $(uname -m)."
-install_streamer
+if [[ "$ROLLBACK" == "1" ]]; then
+    [[ -d "$INSTALL" ]] || die "KiraVR is not installed yet."
+    rollback
+else
+    install_streamer
+fi
 desktop_entry || warn "Could not add the menu entry"
 
 # The dashboard does not need the AppImage's variables, and SteamVR started
 # from it should not see them either.
 unset APPDIR APPIMAGE ARGV0 OWD
-debug "Starting $INSTALL/bin/alvr_dashboard $*"
-exec "$INSTALL/bin/alvr_dashboard" "$@"
+debug "Starting $INSTALL/bin/alvr_dashboard ${DASHBOARD_ARGS[*]}"
+exec "$INSTALL/bin/alvr_dashboard" "${DASHBOARD_ARGS[@]}"

@@ -312,8 +312,42 @@ pub fn build_android_client_openxr_lib(profile: Profile, link_stdcpp: bool) {
     build_android_lib_impl("client_openxr", profile, link_stdcpp, false)
 }
 
+// KiraVR: Restores the client manifest when the build ends, also on a panic.
+struct ManifestGuard {
+    path: PathBuf,
+    original: String,
+}
+
+impl Drop for ManifestGuard {
+    fn drop(&mut self) {
+        fs::write(&self.path, &self.original).ok();
+    }
+}
+
+// KiraVR: Release versions (1.0.0) install as dev.daggenthal.kiravr.stable,
+// pre-releases (1.1.0-dev.1) as .dev, matching what the dashboard looks for.
+// Both can be installed side by side.
+fn select_client_app_id() -> Option<ManifestGuard> {
+    let version = crate::version::version();
+    let stable = !version.contains('-') && !version.contains("nightly");
+    let path = afs::crate_dir("client_openxr").join("Cargo.toml");
+    let original = fs::read_to_string(&path).unwrap();
+    let dev = r#"package = "dev.daggenthal.kiravr.dev""#;
+    if !stable || !original.contains(dev) {
+        return None;
+    }
+    fs::write(
+        &path,
+        original.replace(dev, r#"package = "dev.daggenthal.kiravr.stable""#),
+    )
+    .unwrap();
+    println!("KiraVR {version} is a release: Building as dev.daggenthal.kiravr.stable");
+    Some(ManifestGuard { path, original })
+}
+
 pub fn build_android_client(profile: Profile) {
     let sh = Shell::new().unwrap();
+    let _manifest_guard = select_client_app_id();
 
     let mut flags = vec![];
     match profile {

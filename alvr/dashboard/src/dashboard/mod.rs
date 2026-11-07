@@ -47,6 +47,8 @@ pub enum ServerRequest {
 enum Tab {
     Devices,
     Statistics,
+    #[cfg(not(target_arch = "wasm32"))]
+    LatencyLab,
     Settings,
     #[cfg(not(target_arch = "wasm32"))]
     Installation,
@@ -71,6 +73,8 @@ pub struct Dashboard {
     installation_tab: components::InstallationTab,
     #[cfg(not(target_arch = "wasm32"))]
     diagnostics_tab: components::DiagnosticsTab,
+    #[cfg(not(target_arch = "wasm32"))]
+    latency_lab: components::LatencyLab,
     logs_tab: LogsTab,
     notification_bar: NotificationBar,
     setup_wizard: SetupWizard,
@@ -94,6 +98,8 @@ impl Dashboard {
             tab_labels: [
                 (Tab::Devices, "🔌  Devices"),
                 (Tab::Statistics, "📈  Statistics"),
+                #[cfg(not(target_arch = "wasm32"))]
+                (Tab::LatencyLab, "⏱  Latency Lab"),
                 (Tab::Settings, "🔧  Settings"),
                 #[cfg(not(target_arch = "wasm32"))]
                 (Tab::Installation, "💾  Installation"),
@@ -112,6 +118,8 @@ impl Dashboard {
             installation_tab: components::InstallationTab::new(),
             #[cfg(not(target_arch = "wasm32"))]
             diagnostics_tab: components::DiagnosticsTab::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            latency_lab: components::LatencyLab::new(),
             logs_tab: LogsTab::new(),
             notification_bar: NotificationBar::new(),
             setup_wizard: SetupWizard::new(),
@@ -162,9 +170,12 @@ impl eframe::App for Dashboard {
                     self.notification_bar
                         .push_notification(log_event, event.from_dashboard);
                 }
-                EventType::GraphStatistics(graph_statistics) => self
-                    .statistics_tab
-                    .update_graph_statistics(graph_statistics),
+                EventType::GraphStatistics(graph_statistics) => {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.latency_lab.add_sample(&graph_statistics);
+                    self.statistics_tab
+                        .update_graph_statistics(graph_statistics)
+                }
                 EventType::StatisticsSummary(statistics) => {
                     self.statistics_tab.update_statistics(statistics)
                 }
@@ -178,6 +189,8 @@ impl eframe::App for Dashboard {
                     #[cfg(not(target_arch = "wasm32"))]
                     self.diagnostics_tab
                         .update_log_to_disk(settings.extra.logging.log_to_disk);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.latency_lab.update_settings(&settings);
                     self.settings_tab.update_session(&session.session_settings);
                     self.logs_tab.update_settings(&settings);
                     self.notification_bar.update_settings(&settings);
@@ -339,6 +352,8 @@ impl eframe::App for Dashboard {
                             Tab::Logs => self.logs_tab.ui(ui),
                             #[cfg(not(target_arch = "wasm32"))]
                             Tab::Diagnostics => requests.extend(self.diagnostics_tab.ui(ui)),
+                            #[cfg(not(target_arch = "wasm32"))]
+                            Tab::LatencyLab => requests.extend(self.latency_lab.ui(ui)),
                             Tab::Debug => {
                                 if let Some(request) = components::debug_tab_ui(ui) {
                                     requests.push(request);

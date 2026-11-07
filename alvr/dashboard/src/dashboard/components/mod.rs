@@ -13,6 +13,8 @@ mod statistics;
 mod diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 mod installation;
+#[cfg(not(target_arch = "wasm32"))]
+mod latency_lab;
 
 pub use about::*;
 pub use debug::*;
@@ -29,3 +31,5 @@ pub use statistics::*;
 pub use diagnostics::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub use installation::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use latency_lab::*;

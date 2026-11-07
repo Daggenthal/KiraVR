@@ -188,6 +188,8 @@ pub struct LatencyLab {
     confirm_clear: bool,
     // Slider values while they are being dragged, sent on release.
     draft: Option<Knobs>,
+    // A game that was running when Restart SteamVR was clicked.
+    confirm_restart: Option<String>,
 }
 
 fn state_path() -> std::path::PathBuf {
@@ -210,6 +212,7 @@ impl LatencyLab {
             restart_pending: false,
             confirm_clear: false,
             draft: None,
+            confirm_restart: None,
         }
     }
 
@@ -432,11 +435,47 @@ impl LatencyLab {
                     .color(theme::log_colors::WARNING_LIGHT),
                 );
             }
+            if let Some(game) = self.confirm_restart.clone() {
+                ui.label(
+                    RichText::new(format!(
+                        "{game} is running. Quit it first: Restarting SteamVR under a game kills it, \
+                         and Steam can then hang on its cloud sync."
+                    ))
+                    .color(theme::log_colors::WARNING_LIGHT),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Check Again").clicked() {
+                        match running_game() {
+                            Some(game) => self.confirm_restart = Some(game),
+                            None => {
+                                self.confirm_restart = None;
+                                self.restart_steamvr(requests);
+                            }
+                        }
+                    }
+                    if ui.button("Restart Anyway").clicked() {
+                        self.confirm_restart = None;
+                        self.restart_steamvr(requests);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_restart = None;
+                    }
+                });
+            }
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Restart SteamVR").clicked() {
-                    requests.push(ServerRequest::RestartSteamvr);
-                    self.restart_pending = false;
-                    self.live.clear();
+                if ui
+                    .add_enabled(
+                        self.confirm_restart.is_none(),
+                        Button::new("Restart SteamVR"),
+                    )
+                    .clicked()
+                {
+                    // Restarting under a running game kills it, and Steam
+                    // then hangs on that game's cloud sync.
+                    match running_game() {
+                        Some(game) => self.confirm_restart = Some(game),
+                        None => self.restart_steamvr(requests),
+                    }
                 }
                 if let Some(original) = self.saved.original
                     && ui
@@ -457,6 +496,12 @@ impl LatencyLab {
                 }
             });
         });
+    }
+
+    fn restart_steamvr(&mut self, requests: &mut Vec<ServerRequest>) {
+        requests.push(ServerRequest::RestartSteamvr);
+        self.restart_pending = false;
+        self.live.clear();
     }
 
     fn steps_ui(&mut self, ui: &mut Ui, requests: &mut Vec<ServerRequest>) {
@@ -661,6 +706,11 @@ impl LatencyLab {
         self.save();
         self.status = Some((true, format!("Saved \"{}\".", measurement.label)));
     }
+}
+
+// Shared with the sidebar's Restart SteamVR.
+fn running_game() -> Option<String> {
+    crate::steamvr_launcher::running_game()
 }
 
 fn section(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui)) {

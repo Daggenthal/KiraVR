@@ -1,24 +1,10 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use alvr_common::{
     anyhow::{Result, bail},
     debug, error, info, warn,
 };
-use sysinfo::Process;
-
-pub fn launch_steamvr_with_steam() {
-    if let Err(e) = super::spawn_and_reap(Command::new("steam").args(["steam://rungameid/250820"]))
-    {
-        error!("Failed to launch SteamVR through Steam: {e}");
-    }
-}
-
-pub fn terminate_process(process: &Process) {
-    process.kill_with(sysinfo::Signal::Term);
-}
-
 // Release ALVR wraps SteamVR's vrcompositor to inject its capture layer, and
 // nothing removes that wrap when switching to this build. Direct mode drives
 // the display itself and must not run behind the wrapper, with it in place

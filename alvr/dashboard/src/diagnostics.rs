@@ -209,6 +209,7 @@ fn patterns() -> &'static [(Regex, &'static str, Replace)] {
                 "<ipv6>" => |_| Some("<ipv6>".into()),
                 "<steam-id>" => |_| Some("<steam-id>".into()),
                 "userdata/<id>" => |_| Some("userdata/<id>".into()),
+                "[U:1:<id>]" => |_| Some("[U:1:<id>]".into()),
                 _ => |_| Some("<headset-id>".into()),
             }
         };
@@ -242,6 +243,12 @@ fn patterns() -> &'static [(Regex, &'static str, Replace)] {
                 Regex::new(r"\b7656119\d{10}\b").unwrap(),
                 "Steam ID",
                 fixed("<steam-id>"),
+            ),
+            // Steam's account ID as it prints it in logs.
+            (
+                Regex::new(r"\[U:1:\d+\]").unwrap(),
+                "Steam ID",
+                fixed("[U:1:<id>]"),
             ),
             (
                 Regex::new(r"userdata/\d+").unwrap(),
@@ -863,7 +870,7 @@ mod tests {
              Headset 2G97C5ZH5900S7 at 192.168.1.42, router 8.8.8.8, mac aa:bb:cc:dd:ee:ff\n\
              fe80::1a2b:3c4d and 2001:db8:85a3:0:0:8a2e:370:7334, mail kira@example.com\n\
              Steam /home/kira/.steam/userdata/123456/config, id 76561198000000001\n\
-             Client 4821.client.local. connected",
+             Client 4821.client.local. connected, account [U:1:205159919]",
         );
         assert!(!text.contains("kira-desktop"), "{text}");
         assert!(!text.contains("/home/kira"), "{text}");
@@ -885,6 +892,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("<headset-id>"), "{text}");
+        assert!(
+            text.contains("account [U:1:<id>]") && !text.contains("205159919"),
+            "{text}"
+        );
         assert_eq!(r.counts["IP address"], 4);
     }
 

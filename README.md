@@ -75,6 +75,7 @@ Run `./KiraVR-*.AppImage --uninstall`. It removes the installed copy, the kept o
 - **Logs:** Turn on Settings, Extra, Logging, **Log to disk**, then restart SteamVR. The log is `~/alvr_session_log.txt`. Errors always go to `~/crash_log.txt`. SteamVR's own logs are in `~/.local/share/Steam/logs/`.
 - **SteamVR keeps restarting every two minutes:** Set `"usePrism": false` in SteamVR's settings (System Check does this for you).
 - **SteamVR Home hangs or the menu does not react:** Turn SteamVR Home off (System Check does this too).
+- **Steam keeps restarting, or SteamVR closes after about 30 seconds:** Steam sometimes starts SteamVR on its own after it restarted, without SteamVR's window, and that copy shuts down and takes Steam's VR part with it. KiraVR notices this and starts SteamVR again properly once it is gone. If Steam itself keeps crashing, check free memory and swap (`free -h`): Steam's web helper crashes when memory runs out.
 - **Choppy stream:** Connect the PC with a cable and keep the headset near the router. The performance overlay shows packet loss and where the latency comes from.
 
 **Reporting a problem:** Open the **Diagnostics** tab, click **Collect Diagnostics**, read it over and paste it into a [new issue](https://github.com/Daggenthal/KiraVR/issues/new?template=bug_report.yml). Without a working dashboard: `./KiraVR-*.AppImage --diagnostics > diagnostics.md`.

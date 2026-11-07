@@ -16,7 +16,7 @@ use alvr_gui_common::theme;
 use alvr_packets::{ClientConnectionsAction, PathValuePair};
 use alvr_session::SessionConfig;
 use eframe::egui::{
-    self, Align, CentralPanel, Direction, Frame, Layout, Margin, Panel, RichText, Ui,
+    self, Align, Button, CentralPanel, Direction, Frame, Layout, Margin, Panel, RichText, Ui,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
@@ -79,6 +79,8 @@ pub struct Dashboard {
     notification_bar: NotificationBar,
     setup_wizard: SetupWizard,
     new_version_popup: Option<components::NewVersionPopup>,
+    // KiraVR: A game that was running when Restart SteamVR was clicked.
+    restart_game_confirm: Option<String>,
     setup_wizard_open: bool,
     session: Option<SessionConfig>,
 }
@@ -126,6 +128,7 @@ impl Dashboard {
             setup_wizard_open: false,
             session: None,
             new_version_popup: None,
+            restart_game_confirm: None,
         }
     }
 
@@ -147,7 +150,8 @@ impl Dashboard {
             let server_restarting = Arc::clone(&self.server_restarting);
             let condvar = Arc::clone(&self.server_restarting_condvar);
             move || {
-                crate::steamvr_launcher::LAUNCHER.lock().restart_steamvr();
+                // Without holding LAUNCHER: The restart can wait a minute.
+                crate::steamvr_launcher::restart_steamvr_blocking();
 
                 *server_restarting.lock() = false;
                 condvar.notify_one();
@@ -287,12 +291,46 @@ impl eframe::App for Dashboard {
                         |ui| {
                             ui.add_space(5.0);
 
-                            if connected_to_server {
-                                if ui.button("Restart SteamVR").clicked() {
+                            let busy = crate::steamvr_launcher::is_busy();
+                            if let Some(game) = self.restart_game_confirm.clone() {
+                                // Bottom-up layout: The buttons come first.
+                                if ui.button("Cancel").clicked() {
+                                    self.restart_game_confirm = None;
+                                }
+                                if ui.button("Restart Anyway").clicked() {
+                                    self.restart_game_confirm = None;
                                     self.restart_steamvr(&mut requests);
                                 }
-                            } else if ui.button("Launch SteamVR").clicked() {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{game} is running. Quit it first, restarting SteamVR kills it."
+                                    ))
+                                    .size(12.0)
+                                    .color(theme::log_colors::WARNING_LIGHT),
+                                );
+                            } else if connected_to_server {
+                                if ui.add_enabled(!busy, Button::new("Restart SteamVR")).clicked() {
+                                    match crate::steamvr_launcher::running_game() {
+                                        Some(game) => self.restart_game_confirm = Some(game),
+                                        None => self.restart_steamvr(&mut requests),
+                                    }
+                                }
+                            } else if ui
+                                .add_enabled(
+                                    !busy,
+                                    Button::new(if busy { "Starting..." } else { "Launch SteamVR" }),
+                                )
+                                .clicked()
+                            {
                                 crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
+                            }
+                            if let Some(status) = crate::steamvr_launcher::status() {
+                                ui.label(
+                                    RichText::new(status)
+                                        .size(12.0)
+                                        .color(theme::log_colors::WARNING_LIGHT),
+                                );
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
                             }
 
                             ui.horizontal(|ui| {

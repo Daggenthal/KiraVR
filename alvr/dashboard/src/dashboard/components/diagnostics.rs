@@ -242,7 +242,7 @@ fn save(text: &str) -> Result<(std::path::PathBuf, String), String> {
 // (Dolphin, Nautilus and others through the FileManager1 D-Bus service,
 // Explorer on Windows), otherwise just its folder.
 fn show_in_folder(path: &std::path::Path) -> std::io::Result<()> {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     #[cfg(windows)]
     {
@@ -264,8 +264,8 @@ fn show_in_folder(path: &std::path::Path) -> std::io::Result<()> {
                 &format!("array:string:{uri}"),
                 "string:",
             ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|s| s.success());
         if !selected {

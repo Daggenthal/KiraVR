@@ -110,6 +110,10 @@ fn main() {
         steamvr_launcher::LAUNCHER.lock().launch_steamvr()
     }
 
+    // KiraVR: Catches a SteamVR that Steam started without its monitor.
+    #[cfg(target_os = "linux")]
+    steamvr_launcher::start_health_monitor();
+
     let ico = IconDir::read(Cursor::new(include_bytes!("../resources/dashboard.ico"))).unwrap();
     let image = ico.entries().first().unwrap().decode().unwrap();
 

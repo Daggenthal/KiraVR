@@ -869,6 +869,18 @@ pub fn build_layout(
                 format!("{:.0} / {:.0} fps", server.server_fps, server.client_fps),
                 fps_color(server.server_fps.min(server.client_fps), info.refresh_hz),
             ));
+            // Frames the streamer could not encode in time (see vsync.rs).
+            if server.streamer_dropped_fps >= 0.5 {
+                left.push(OverlayItem::row(
+                    "Dropped by streamer",
+                    format!("{:.0} /s", server.streamer_dropped_fps),
+                    if server.streamer_dropped_fps >= 3.0 {
+                        RED
+                    } else {
+                        YELLOW
+                    },
+                ));
+            }
             let pair = |a: f32, b: f32| format!("{a:.1} / {b:.1} ms");
             left.push(OverlayItem::Divider);
             left.push(OverlayItem::header("Latency"));

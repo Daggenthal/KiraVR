@@ -228,6 +228,9 @@ extern "C" void StartVsyncAnnouncer();
 extern "C" void StopVsyncAnnouncer();
 extern "C" void PaceAfterPresent(unsigned int throttleFrames);
 extern "C" unsigned int TakeSkippedVsyncs();
+// KiraVR: Reports each frame handed to the encode mailbox. 0 queued, 1 queued
+// and replaced a frame still waiting, 2 dropped as too old.
+extern "C" void ReportEncodeJob(unsigned int outcome);
 
 extern "C" void CppInit(bool earlyHmdInitialization, Settings settings);
 extern "C" void* CppOpenvrEntryPoint(const char* pInterfaceName, int* pReturnCode);

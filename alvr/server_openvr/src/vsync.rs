@@ -175,3 +175,61 @@ extern "C" fn take_skipped_vsyncs() -> u32 {
 
     skipped.min(u32::MAX as u64) as u32
 }
+
+// KiraVR: What happened to each frame handed to the encoder. The Linux encode
+// mailbox keeps only the newest frame, so when encoding falls behind (a high
+// refresh rate or resolution), frames are dropped there without a trace. This
+// counts them for the statistics and logs a summary at most every 10 s.
+const ENCODE_QUEUED: u32 = 0;
+const ENCODE_REPLACED: u32 = 1;
+const ENCODE_TOO_OLD: u32 = 2;
+const DROP_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+static ENCODE_JOBS: AtomicU64 = AtomicU64::new(0);
+static ENCODE_REPLACED_COUNT: AtomicU64 = AtomicU64::new(0);
+static ENCODE_TOO_OLD_COUNT: AtomicU64 = AtomicU64::new(0);
+// (when, jobs, replaced, too old) at the last summary.
+static DROP_LOG: Mutex<Option<(Instant, u64, u64, u64)>> = Mutex::new(None);
+
+#[unsafe(export_name = "ReportEncodeJob")]
+extern "C" fn report_encode_job(outcome: u32) {
+    match outcome {
+        ENCODE_QUEUED => {
+            ENCODE_JOBS.fetch_add(1, Ordering::Relaxed);
+        }
+        ENCODE_REPLACED => {
+            ENCODE_JOBS.fetch_add(1, Ordering::Relaxed);
+            ENCODE_REPLACED_COUNT.fetch_add(1, Ordering::Relaxed);
+            alvr_server_core::report_streamer_drop();
+        }
+        ENCODE_TOO_OLD => {
+            ENCODE_TOO_OLD_COUNT.fetch_add(1, Ordering::Relaxed);
+            alvr_server_core::report_streamer_drop();
+        }
+        _ => (),
+    }
+
+    let now = Instant::now();
+    let jobs = ENCODE_JOBS.load(Ordering::Relaxed);
+    let replaced = ENCODE_REPLACED_COUNT.load(Ordering::Relaxed);
+    let too_old = ENCODE_TOO_OLD_COUNT.load(Ordering::Relaxed);
+    let mut log = DROP_LOG.lock();
+    let Some((since, jobs0, replaced0, too_old0)) = *log else {
+        *log = Some((now, jobs, replaced, too_old));
+        return;
+    };
+    if now.duration_since(since) < DROP_LOG_INTERVAL {
+        return;
+    }
+    *log = Some((now, jobs, replaced, too_old));
+    let (frames, replaced, too_old) = (jobs - jobs0, replaced - replaced0, too_old - too_old0);
+    if replaced + too_old > 0 {
+        alvr_common::warn!(
+            "Streamer dropped {} of {frames} frames in the last {:.0} s before encoding \
+             ({replaced} replaced while the encoder was busy, {too_old} too old). \
+             The encoder is not keeping up with the refresh rate at this resolution.",
+            replaced + too_old,
+            now.duration_since(since).as_secs_f32()
+        );
+    }
+}

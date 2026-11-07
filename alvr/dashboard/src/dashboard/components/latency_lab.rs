@@ -27,7 +27,19 @@ struct Knobs {
     history_weight: f32,
     fps: f32,
     codec: CodecType,
+    // Encoding width per eye when the resolution is set as Absolute. None in
+    // Scale mode. Saved results from before this field read as None.
+    #[serde(default)]
+    width: Option<u32>,
 }
+
+// Encoding widths per eye to try, multiples of 32 as the setting requires.
+const WIDTHS: [(u32, &str); 4] = [
+    (2144, "100 %"),
+    (1824, "85 %"),
+    (1600, "75 %"),
+    (1280, "60 %"),
+];
 
 impl Knobs {
     fn from_settings(settings: &Settings) -> Self {
@@ -36,12 +48,17 @@ impl Knobs {
             history_weight: settings.video.buffering_history_weight,
             fps: settings.video.preferred_fps,
             codec: settings.video.preferred_codec,
+            width: match settings.video.transcoding_view_resolution {
+                alvr_session::FrameSize::Absolute { width, .. } => Some(width),
+                _ => None,
+            },
         }
     }
 
     fn describe(&self) -> String {
+        let width = self.width.map(|w| format!(", {w} px")).unwrap_or_default();
         format!(
-            "{} Hz, {}, buffering {:.1} (weight {:.2})",
+            "{} Hz, {}{width}, buffering {:.1} (weight {:.2})",
             self.fps,
             codec_name(self.codec),
             self.max_buffering,
@@ -113,6 +130,26 @@ const STEPS: &[Step] = &[
         needs_restart: true,
     },
     Step {
+        name: "90 Hz, 85 % resolution",
+        expect: "If more new frames arrive than at full resolution, the encoder is the limit",
+        change: |k| Knobs {
+            fps: 90.0,
+            width: Some(1824),
+            ..k
+        },
+        needs_restart: true,
+    },
+    Step {
+        name: "90 Hz, 75 % resolution",
+        expect: "Same question with more headroom for the encoder",
+        change: |k| Knobs {
+            fps: 90.0,
+            width: Some(1600),
+            ..k
+        },
+        needs_restart: true,
+    },
+    Step {
         name: "H.264",
         expect: "Compare decode time between codecs",
         change: |k| Knobs {
@@ -161,6 +198,18 @@ struct TestResult {
     fps_low: f32,
     // Share of frames below 90 % of the refresh rate, a stutter measure.
     slow_percent: f32,
+    // Frames SteamVR handed to the streamer per second.
+    #[serde(default)]
+    server_fps: f32,
+    // New stream frames the headset showed per second, counted.
+    #[serde(default)]
+    new_fps: f32,
+    // Share of the headset's display refreshes that showed an old frame again.
+    #[serde(default)]
+    repeated_percent: f32,
+    // Frames the streamer dropped before encoding, per second.
+    #[serde(default)]
+    dropped_fps: f32,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -272,6 +321,12 @@ impl LatencyLab {
         if target.codec != current.codec {
             set("preferred_codec.variant", codec_value(target.codec).into());
         }
+        if target.width != current.width
+            && let Some(width) = target.width
+        {
+            set("transcoding_view_resolution.variant", "Absolute".into());
+            set("transcoding_view_resolution.Absolute.width", width.into());
+        }
         if !values.is_empty() {
             requests.push(ServerRequest::SetSessionValues(values));
             self.current = Some(target);
@@ -315,13 +370,19 @@ impl LatencyLab {
 
     fn live_ui(&self, ui: &mut Ui) {
         section(ui, "Live (Last 5 Seconds)", |ui| {
-            let Some(avg) = average(self.live.iter().map(|(_, s)| s)) else {
+            let Some(mut avg) = average(self.live.iter().map(|(_, s)| s)) else {
                 ui.label(
                     RichText::new("Not streaming. Numbers appear once the headset is connected.")
                         .weak(),
                 );
                 return;
             };
+            if let (Some((first, _)), Some((last, _))) = (self.live.front(), self.live.back()) {
+                let samples = self.live.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>();
+                let refresh = self.current.map(|k| k.fps).unwrap_or(72.0);
+                (avg.new_fps, avg.repeated_percent) =
+                    frame_rates(&samples, refresh, last.duration_since(*first).as_secs_f32());
+            }
             Grid::new("latency_lab_live")
                 .num_columns(2)
                 .spacing([16.0, 3.0])
@@ -350,10 +411,19 @@ impl LatencyLab {
                         format!("{:.1} / {:.1} ms", avg.render_ms, avg.vsync_ms),
                         false,
                     );
+                    row("Streamer fps", format!("{:.0}", avg.server_fps), false);
                     row(
-                        "FPS (headset)",
-                        format!("{:.0} (low {:.0})", avg.fps_avg, avg.fps_low),
-                        false,
+                        "New frames on headset",
+                        format!(
+                            "{:.0} /s ({:.0} % repeated)",
+                            avg.new_fps, avg.repeated_percent
+                        ),
+                        true,
+                    );
+                    row(
+                        "Dropped by streamer",
+                        format!("{:.1} /s", avg.dropped_fps),
+                        avg.dropped_fps >= 0.5,
                     );
                 });
         });
@@ -390,6 +460,30 @@ impl LatencyLab {
                     }
                 }
             });
+            ui.label("Resolution (encoded width per eye)");
+            if target.width.is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    for (width, share) in WIDTHS {
+                        if ui
+                            .selectable_label(
+                                target.width == Some(width),
+                                format!("{share} ({width})"),
+                            )
+                            .clicked()
+                        {
+                            target.width = Some(width);
+                            picked = true;
+                        }
+                    }
+                });
+            } else {
+                ui.label(
+                    RichText::new(
+                        "Set as a scale in Settings, Video. Switch it to Absolute to test it here.",
+                    )
+                    .weak(),
+                );
+            }
             ui.label("Codec");
             ui.horizontal(|ui| {
                 for codec in [CodecType::H264, CodecType::Hevc, CodecType::AV1] {
@@ -603,8 +697,19 @@ impl LatencyLab {
                         .spacing([12.0, 4.0])
                         .show(ui, |ui| {
                             for title in [
-                                "Test", "Settings", "Total", "Encode", "Network", "Decode",
-                                "Queue", "Vsync", "FPS", "Low", "Slow",
+                                "Test",
+                                "Settings",
+                                "Total",
+                                "Encode",
+                                "Network",
+                                "Decode",
+                                "Queue",
+                                "Vsync",
+                                "Streamer",
+                                "New/s",
+                                "Repeated",
+                                "Dropped/s",
+                                "Slow",
                             ] {
                                 ui.label(RichText::new(title).strong());
                             }
@@ -622,8 +727,18 @@ impl LatencyLab {
                                 ] {
                                     ui.label(RichText::new(format!("{value:.1}")).monospace());
                                 }
-                                ui.label(RichText::new(format!("{:.0}", r.fps_avg)).monospace());
-                                ui.label(RichText::new(format!("{:.0}", r.fps_low)).monospace());
+                                for (value, digits) in [(r.server_fps, 0), (r.new_fps, 0)] {
+                                    ui.label(
+                                        RichText::new(format!("{value:.digits$}")).monospace(),
+                                    );
+                                }
+                                ui.label(
+                                    RichText::new(format!("{:.0}%", r.repeated_percent))
+                                        .monospace(),
+                                );
+                                ui.label(
+                                    RichText::new(format!("{:.1}", r.dropped_fps)).monospace(),
+                                );
                                 ui.label(
                                     RichText::new(format!("{:.1}%", r.slow_percent)).monospace(),
                                 );
@@ -690,6 +805,11 @@ impl LatencyLab {
             return;
         };
         let refresh = measurement.knobs.fps;
+        let (new_fps, repeated_percent) = frame_rates(
+            &measurement.samples,
+            refresh,
+            measurement.started.elapsed().as_secs_f32(),
+        );
         let slow = measurement
             .samples
             .iter()
@@ -701,6 +821,8 @@ impl LatencyLab {
             knobs: measurement.knobs,
             samples: measurement.samples.len(),
             slow_percent: 100.0 * slow as f32 / measurement.samples.len() as f32,
+            new_fps,
+            repeated_percent,
             ..avg
         });
         self.save();
@@ -744,6 +866,7 @@ fn average<'a>(samples: impl Iterator<Item = &'a GraphStatistics>) -> Option<Tes
             history_weight: 0.0,
             fps: 0.0,
             codec: CodecType::H264,
+            width: None,
         },
         samples: samples.len(),
         total_ms: ms(|s| s.total_pipeline_latency_s),
@@ -758,17 +881,36 @@ fn average<'a>(samples: impl Iterator<Item = &'a GraphStatistics>) -> Option<Tes
         fps_avg: fps.iter().sum::<f32>() / n,
         fps_low: fps[(fps.len() as f32 * 0.05) as usize],
         slow_percent: 0.0,
+        server_fps: samples.iter().map(|s| s.server_fps).sum::<f32>() / n,
+        new_fps: 0.0,
+        repeated_percent: 0.0,
+        dropped_fps: samples.iter().map(|s| s.streamer_dropped_fps).sum::<f32>() / n,
     })
+}
+
+// New frames per second, and the share of display refreshes that repeated an
+// old frame. Each sample is one new frame; its interval says for how many
+// refreshes it stayed on screen.
+fn frame_rates(samples: &[GraphStatistics], refresh: f32, seconds: f32) -> (f32, f32) {
+    if samples.is_empty() || seconds <= 0.0 || refresh <= 0.0 {
+        return (0.0, 0.0);
+    }
+    let slots = samples
+        .iter()
+        .map(|s| (refresh / s.client_fps.max(1.0)).round().max(1.0))
+        .sum::<f32>();
+    let new = samples.len() as f32;
+    (new / seconds, 100.0 * (slots - new) / slots)
 }
 
 fn results_markdown(results: &[TestResult]) -> String {
     let mut text = String::from(
-        "| Test | Settings | Total | Game | Compose | Encode | Network | Decode | Queue | Render | Vsync | FPS | Low | Slow | When |\n\
-         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
+        "| Test | Settings | Total | Game | Compose | Encode | Network | Decode | Queue | Render | Vsync | Streamer fps | New frames/s | Repeated | Dropped/s | FPS | Low | Slow | When |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for r in results {
         text += &format!(
-            "| {} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.1}% | {} |\n",
+            "| {} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0}% | {:.1} | {:.0} | {:.0} | {:.1}% | {} |\n",
             r.label,
             r.knobs.describe(),
             r.total_ms,
@@ -780,6 +922,10 @@ fn results_markdown(results: &[TestResult]) -> String {
             r.queue_ms,
             r.render_ms,
             r.vsync_ms,
+            r.server_fps,
+            r.new_fps,
+            r.repeated_percent,
+            r.dropped_fps,
             r.fps_avg,
             r.fps_low,
             r.slow_percent,
@@ -820,6 +966,7 @@ mod tests {
             history_weight: 0.9,
             fps: 72.0,
             codec: CodecType::Hevc,
+            width: Some(2144),
         };
         assert_eq!((STEPS[0].change)(base), base);
         for step in &STEPS[1..] {
@@ -828,16 +975,35 @@ mod tests {
                 changed.max_buffering != base.max_buffering,
                 changed.fps != base.fps,
                 changed.codec != base.codec,
+                changed.width != base.width,
             ]
             .iter()
             .filter(|d| **d)
             .count();
+            // The resolution steps pair 90 Hz with a lower resolution on purpose.
+            let allowed = if step.name.contains("resolution") {
+                2
+            } else {
+                1
+            };
             assert!(
-                differences <= 1,
-                "{} changes more than one thing",
+                differences <= allowed,
+                "{} changes more than it should",
                 step.name
             );
         }
+    }
+
+    #[test]
+    fn counts_new_and_repeated_frames() {
+        // 90 Hz display, 72 new frames per second: 54 shown once (90 fps
+        // interval) and 18 shown twice (45 fps interval) fill 90 refreshes.
+        let mut samples = vec![stats(0.05, 0.0, 90.0); 54];
+        samples.extend(vec![stats(0.05, 0.0, 45.0); 18]);
+        let (new_fps, repeated) = frame_rates(&samples, 90.0, 1.0);
+        assert_eq!(new_fps, 72.0);
+        assert!((repeated - 20.0).abs() < 0.01, "{repeated}");
+        assert_eq!(frame_rates(&[], 90.0, 1.0), (0.0, 0.0));
     }
 
     #[test]

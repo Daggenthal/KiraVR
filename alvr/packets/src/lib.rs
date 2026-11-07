@@ -164,6 +164,10 @@ pub struct PerfStats {
     pub client_compositor_ms: f32,
     pub vsync_queue_ms: f32,
     pub bitrate_mbps: f32,
+    // Frames the streamer dropped before encoding, per second. Default for
+    // streamers that do not send it.
+    #[serde(default)]
+    pub streamer_dropped_fps: f32,
 }
 
 // KiraVR: The overlay settings, sent whenever they change in the dashboard so

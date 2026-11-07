@@ -48,6 +48,9 @@ pub struct GraphStatistics {
     pub bitrate_directives: BitrateDirectives,
     pub throughput_bps: f32,
     pub bitrate_bps: f32,
+    // KiraVR: Frames the streamer dropped before encoding, per second.
+    #[serde(default)]
+    pub streamer_dropped_fps: f32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

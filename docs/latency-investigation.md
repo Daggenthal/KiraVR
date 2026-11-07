@@ -45,4 +45,33 @@ Settings: Video, Maximum buffering (and Buffering history weight next to it); Vi
 
 ## Results
 
-(Filled in during testing.)
+### Run 1 (2026-11-06, Beat Saber main menu, head still, 60 s each)
+
+| Test | Total | Decode queue | Vsync | Headset fps (low) | Slow |
+|---|---|---|---|---|---|
+| Baseline (72 Hz, H.264, buffering 2.0) | 49.8 | 9.6 | 18.7 | 72 (72) | 0 % |
+| Buffering 1.0 | 47.9 | 6.3 | 19.3 | 72 (72) | 0.4 % |
+| Buffering 1.5 | 46.9 | 4.3 | 19.0 | 72 (72) | 0.1 % |
+| 90 Hz | 61.9 | 1.2 | 38.0 | 79 (45) | 25 % |
+| 120 Hz | 47.9 | 1.9 | 23.9 | 80 (60) | 66 % |
+| H.264 (same as baseline) | 54.3 | 13.5 | 18.7 | 72 (72) | 0.1 % |
+| HEVC | 56.7 | 13.9 | 19.6 | 72 (72) | 0.5 % |
+| AV1 (two runs) | 53.2 / 56.0 | 11.2 / 13.2 | 18.8 | 72 (72) | 0.7 / 0.1 % |
+
+Times in ms. Network was a steady 3 ms, encode 8 ms (AV1 7 ms), decode 6.4 ms (H.264), 7.7 (HEVC), 8 (AV1).
+
+What it shows:
+
+1. **The decode queue varies run to run with the same settings** (9.6 vs 13.5 ms). That is the free-running Linux grid drifting against the headset. The buffering differences are about as large as that noise, so they do not prove much on their own. Locking the grid to the headset is the real fix.
+2. **90 and 120 Hz did not deliver more frames.** MangoHud showed the game at 90 and 120 fps, and the headset ran at 90 and 120 Hz (the "low" values are exactly half the refresh: repeated frames). But only about 72 new frames per second reached the headset (4321 and 4270 samples in 60 s, one sample per new frame shown). The "fps" column was misleading: It averaged per-frame values. Suspected cause: The Linux encode mailbox keeps only the newest frame ("latest wins") and silently drops the rest when the encoder is busy, so the encoder's throughput at this resolution (SteamVR renders 3216x3360) would be the limit.
+3. **H.264 is fine.** It decodes fastest; the totals are within the noise.
+
+Recommendation until the code changes: 72 Hz, H.264, buffering 1.5.
+
+### Next run: Where do the 90 Hz frames go?
+
+The driver now counts frames dropped from the encode mailbox (`ReportEncodeJob`, logged every 10 s as "Streamer dropped N of M frames", shown as "Dropped by streamer" in the overlay and the Lab). The Lab records streamer fps, new frames per second on the headset and the share of repeated frames, and has resolution steps.
+
+1. Baseline at 72 Hz.
+2. 90 Hz at full resolution: Expect "Dropped by streamer" around 18/s if the encoder is the limit.
+3. 90 Hz at 85 % and 75 % resolution: If new frames per second rise toward 90 and the drops fall, encoder throughput is proven, and the fix is encoder settings for throughput plus sensible defaults for high refresh rates.

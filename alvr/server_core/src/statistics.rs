@@ -3,6 +3,7 @@ use alvr_events::{BitrateDirectives, EventType, GraphStatistics, StatisticsSumma
 use alvr_packets::{ClientStatistics, PerfStats};
 use std::{
     collections::{HashMap, VecDeque},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -42,19 +43,36 @@ struct BatteryData {
 
 // KiraVR: Sums over one summary window, averaged into a PerfStats snapshot for
 // the headset's performance overlay. Single frames are too noisy to read.
+// KiraVR: Frames the driver dropped before encoding (on Linux the encode
+// mailbox keeps only the newest frame). Counted from the driver thread,
+// turned into a rate per second by the statistics.
+static STREAMER_DROPS: AtomicU64 = AtomicU64::new(0);
+
+pub fn report_streamer_drop() {
+    STREAMER_DROPS.fetch_add(1, Ordering::Relaxed);
+}
+
 #[derive(Default)]
 struct PerfWindow {
     frames: u32,
     sums_s: [f32; 9],
     client_fps: f32,
     server_fps: f32,
+    streamer_dropped_fps: f32,
 }
 
 impl PerfWindow {
     // Order: total, game, server compositor, encoder, network, decoder,
     // decoder queue, client compositor, vsync queue.
-    fn add(&mut self, latencies: [Duration; 9], client_fps: f32, server_fps: f32) {
+    fn add(
+        &mut self,
+        latencies: [Duration; 9],
+        client_fps: f32,
+        server_fps: f32,
+        streamer_dropped_fps: f32,
+    ) {
         self.frames += 1;
+        self.streamer_dropped_fps += streamer_dropped_fps;
         for (sum, latency) in self.sums_s.iter_mut().zip(latencies) {
             *sum += latency.as_secs_f32();
         }
@@ -81,6 +99,7 @@ impl PerfWindow {
             client_compositor_ms: ms(7),
             vsync_queue_ms: ms(8),
             bitrate_mbps,
+            streamer_dropped_fps: self.streamer_dropped_fps / n,
         };
         *self = Self::default();
         Some(stats)
@@ -105,6 +124,8 @@ pub struct StatisticsManager {
     last_vsync_time: Instant,
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
+    // (when, total drops so far), the last second of them.
+    drop_samples: VecDeque<(Instant, u64)>,
 }
 
 impl StatisticsManager {
@@ -137,6 +158,7 @@ impl StatisticsManager {
             last_vsync_time: Instant::now(),
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
+            drop_samples: VecDeque::new(),
         }
     }
 
@@ -223,11 +245,32 @@ impl StatisticsManager {
         self.last_throughput_directives = stats;
     }
 
+    // KiraVR: Driver drops per second over the last second.
+    fn streamer_dropped_fps(&mut self) -> f32 {
+        let now = Instant::now();
+        self.drop_samples
+            .push_back((now, STREAMER_DROPS.load(Ordering::Relaxed)));
+        while self.drop_samples.len() > 2
+            && now.duration_since(self.drop_samples[1].0) >= Duration::from_secs(1)
+        {
+            self.drop_samples.pop_front();
+        }
+        let (first_at, first) = self.drop_samples[0];
+        let span = now.duration_since(first_at).as_secs_f32();
+        if span < 0.2 {
+            return 0.0;
+        }
+        let last = self.drop_samples.back().unwrap().1;
+        last.saturating_sub(first) as f32 / span
+    }
+
     // Called every frame. Some statistics are reported once every frame
     // Returns (network latency, game time latency)
     pub fn report_statistics(&mut self, client_stats: ClientStatistics) -> (Duration, Duration) {
         self.motion_to_photon_latency_average
             .submit_sample(client_stats.total_pipeline_latency);
+        // Before borrowing the history below.
+        let streamer_dropped_fps = self.streamer_dropped_fps();
 
         if let Some(frame) = self
             .history_buffer
@@ -283,6 +326,7 @@ impl StatisticsManager {
                 ],
                 client_fps,
                 server_fps,
+                streamer_dropped_fps,
             );
 
             if self.last_full_report_instant + FULL_REPORT_INTERVAL < Instant::now() {
@@ -350,6 +394,7 @@ impl StatisticsManager {
                 bitrate_directives: self.last_throughput_directives.clone(),
                 throughput_bps,
                 bitrate_bps,
+                streamer_dropped_fps,
             }));
 
             (network_latency, game_time_latency)

@@ -201,6 +201,7 @@ void OvrDirectModeComponent::EncodeWorkerLoop() {
         );
         if (std::chrono::steady_clock::now() - job.enqueueTime > ageLimit) {
             closeWaitFds(job.waitFds);
+            ReportEncodeJob(2);
             continue;
         }
 
@@ -688,6 +689,7 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         }
     }
 
+    bool replaced = false;
     {
         std::lock_guard<std::mutex> lock(m_jobMutex);
         if (m_workerExit) {
@@ -699,11 +701,14 @@ void OvrDirectModeComponent::Present(vr::SharedTextureHandle_t syncTexture) {
         // never be waited on, so close them here.
         if (m_jobPending) {
             closeWaitFds(m_job.waitFds);
+            replaced = true;
         }
         m_job = job;
         m_jobPending = true;
     }
     m_jobCv.notify_one();
+    // Outside the lock: The report may log.
+    ReportEncodeJob(replaced ? 1 : 0);
 }
 
 void OvrDirectModeComponent::PostPresent(const Throttling_t* pThrottling) {

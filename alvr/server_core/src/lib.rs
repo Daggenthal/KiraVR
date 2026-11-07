@@ -7,6 +7,7 @@ mod input_mapping;
 mod logging_backend;
 mod sockets;
 mod statistics;
+pub use statistics::report_streamer_drop;
 mod tracking;
 mod web_server;
 

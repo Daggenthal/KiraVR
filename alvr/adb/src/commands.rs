@@ -235,6 +235,78 @@ pub fn install_package(adb_path: &str, device_serial: &str, apk_path: &str) -> R
     anyhow::bail!("{reason}")
 }
 
+// KiraVR: Installs by streaming the APK into `pm install` ourselves, so the
+// caller sees how many bytes went out (adb install reports nothing until it
+// is done). `progress(sent, total)` is called after every chunk.
+pub fn install_package_streamed(
+    adb_path: &str,
+    device_serial: &str,
+    apk_path: &str,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<()> {
+    use std::{
+        io::{Read, Write},
+        process::Stdio,
+    };
+
+    let mut file = std::fs::File::open(apk_path).context(format!("Cannot open {apk_path}"))?;
+    let total = file.metadata()?.len();
+    let size = total.to_string();
+    let mut child = get_command(
+        adb_path,
+        &[
+            "-s",
+            device_serial,
+            "shell",
+            "pm",
+            "install",
+            "-r",
+            "-S",
+            &size,
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .context("Failed to start adb")?;
+
+    let mut stdin = child.stdin.take().context("No stdin for adb")?;
+    let mut buffer = vec![0; 256 * 1024];
+    let mut sent = 0;
+    progress(0, total);
+    let copied = (|| -> std::io::Result<()> {
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                return Ok(());
+            }
+            stdin.write_all(&buffer[..read])?;
+            sent += read as u64;
+            progress(sent, total);
+        }
+    })();
+    drop(stdin);
+
+    let output = child.wait_with_output().context("adb did not finish")?;
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if text.contains("Success") {
+        return Ok(());
+    }
+    copied.context("Sending the APK to the headset failed")?;
+    let reason = text
+        .lines()
+        .find(|l| l.contains("Failure") || l.contains("failed") || l.contains("error"))
+        .unwrap_or(text.trim())
+        .trim()
+        .to_owned();
+    anyhow::bail!("{reason}")
+}
+
 // KiraVR: The installed app's versionName, None if it is not installed.
 pub fn installed_version(
     adb_path: &str,

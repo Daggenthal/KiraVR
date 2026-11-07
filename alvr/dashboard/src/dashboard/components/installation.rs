@@ -217,17 +217,42 @@ fn headset_app_ui(app: &crate::headset_app::HeadsetApp, ui: &mut Ui) {
 
             match job {
                 Job::Idle => (),
-                Job::Working { message, progress } => {
-                    ui.add(
-                        ProgressBar::new(progress.unwrap_or(0.0))
-                            .text(message)
-                            .animate(progress.is_none()),
-                    );
+                Job::Working {
+                    step,
+                    steps,
+                    title,
+                    transfer,
+                    note,
+                } => {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(format!("Step {step} of {steps}: {title}")).strong());
+                    let fraction = transfer.as_ref().and_then(|t| t.fraction());
+                    let bar = match fraction {
+                        Some(f) => ProgressBar::new(f).text(
+                            RichText::new(format!("{:.0}%", f * 100.0)).monospace(),
+                        ),
+                        // Nothing to count (the headset is installing): Show
+                        // the overall step instead, animated.
+                        None => ProgressBar::new((step - 1) as f32 / steps as f32).animate(true),
+                    };
+                    ui.add(bar.desired_height(22.0));
+                    if let Some(transfer) = &transfer {
+                        // Monospace, so the numbers do not jitter while they change.
+                        ui.label(RichText::new(transfer.readout().join("  ·  ")).monospace());
+                    }
+                    if let Some(note) = note {
+                        ui.label(RichText::new(note).color(theme::FG.gamma_multiply(0.7)));
+                    }
                 }
-                Job::Done(message) => {
-                    ui.label(RichText::new(message).color(theme::OK_GREEN));
+                Job::Done { message, note } => {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(message).color(theme::OK_GREEN).strong());
+                    if let Some(note) = note {
+                        ui.label(RichText::new(note).color(theme::FG.gamma_multiply(0.7)));
+                    }
                 }
                 Job::Failed(message) => {
+                    ui.add_space(4.0);
                     ui.label(RichText::new(message).color(log_colors::ERROR_LIGHT));
                 }
             }

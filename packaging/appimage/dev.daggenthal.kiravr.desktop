@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=KiraVR
+GenericName=PC VR Streaming
+Comment=Stream SteamVR to a standalone headset
+Exec=AppRun %U
+Icon=dev.daggenthal.kiravr
+Terminal=false
+Categories=Game;Utility;
+Keywords=VR;SteamVR;Quest;ALVR;Streaming;
+StartupWMClass=alvr.dashboard

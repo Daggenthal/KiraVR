@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# KiraVR AppImage launcher.
+#
+# SteamVR loads the driver from a registered path, and an AppImage is mounted
+# at a new /tmp/.mount_* path on every start. So the streamer is copied to a
+# fixed place under $HOME (only when this AppImage holds a different build),
+# and the dashboard runs from there. It registers that copy with SteamVR when
+# it launches SteamVR.
+#
+#   KiraVR.AppImage [dashboard args]   Install or update, then open the dashboard
+#   KiraVR.AppImage --preflight [--fix]  Same, runs the system check in the terminal
+#   KiraVR.AppImage --uninstall        Remove the installed copy and menu entry
+#
+# Env: KIRAVR_DEBUG=1 logs every step, NO_COLOR=1 disables colors,
+# KIRAVR_NO_DESKTOP_ENTRY=1 skips the menu entry.
+
+set -uo pipefail
+
+KIRAVR_DEBUG="${KIRAVR_DEBUG:-0}"
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+    RED=$'\e[31m' BOLD_RED=$'\e[1;31m' YELLOW=$'\e[33m' GREEN=$'\e[32m' CYAN=$'\e[36m' BOLD=$'\e[1m' RESET=$'\e[0m'
+else
+    RED="" BOLD_RED="" YELLOW="" GREEN="" CYAN="" BOLD="" RESET=""
+fi
+info()  { echo "${BOLD}==>${RESET} $*" >&2; }
+ok()    { echo "${GREEN}OK:${RESET} $*" >&2; }
+warn()  { echo "${YELLOW}Warning:${RESET} $*" >&2; }
+error() { echo "${RED}Error:${RESET} $*" >&2; }
+debug() { [[ "$KIRAVR_DEBUG" == "1" ]] && echo "${CYAN}debug:${RESET} $*" >&2; return 0; }
+die() {
+    echo "${BOLD_RED}KiraVR could not start${RESET}" >&2
+    error "$*"
+    # The menu entry has no terminal, so also show it on the desktop.
+    if [[ ! -t 2 ]] && command -v notify-send >/dev/null; then
+        notify-send -i dialog-error "KiraVR could not start" "$*" || true
+    fi
+    [[ "$KIRAVR_DEBUG" == "1" ]] && { warn "Debug mode: Continuing anyway"; return 0; }
+    exit 1
+}
+[[ "$KIRAVR_DEBUG" == "1" ]] && set -x
+
+APPDIR="${APPDIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+PAYLOAD="$APPDIR/usr/share/kiravr/streamer"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+INSTALL_ROOT="$DATA_HOME/kiravr"
+INSTALL="$INSTALL_ROOT/streamer"
+DESKTOP_FILE="$DATA_HOME/applications/dev.daggenthal.kiravr.desktop"
+ICON_FILE="$DATA_HOME/icons/hicolor/256x256/apps/dev.daggenthal.kiravr.png"
+DRIVER_DIR="$INSTALL/lib64/alvr"
+
+find_vrpathreg() {
+    local candidate
+    for candidate in \
+        "$HOME/.local/share/Steam/steamapps/common/SteamVR/bin/vrpathreg.sh" \
+        "$HOME/.steam/steam/steamapps/common/SteamVR/bin/vrpathreg.sh"; do
+        [[ -x "$candidate" ]] && { echo "$candidate"; return 0; }
+    done
+    return 1
+}
+
+uninstall() {
+    info "Removing KiraVR from $INSTALL_ROOT"
+    if pgrep -x vrserver >/dev/null; then
+        die "SteamVR is running. Close it first."
+    fi
+    local vrpathreg
+    if vrpathreg="$(find_vrpathreg)"; then
+        "$vrpathreg" removedriver "$DRIVER_DIR" >/dev/null 2>&1 \
+            && ok "Driver unregistered from SteamVR" \
+            || warn "Could not unregister the driver (it may not have been registered)"
+    else
+        warn "SteamVR not found, skipped unregistering the driver"
+    fi
+    rm -rf "$INSTALL" "$INSTALL.new" "$INSTALL.old"
+    rm -f "$DESKTOP_FILE" "$ICON_FILE"
+    command -v update-desktop-database >/dev/null && update-desktop-database "$DATA_HOME/applications" 2>/dev/null
+    ok "Uninstalled. Settings stay in ~/.config/alvr, delete that folder too for a clean slate."
+    exit 0
+}
+
+# Copies the streamer out of the AppImage when it holds a different build.
+install_streamer() {
+    local wanted installed=""
+    wanted="$(cat "$PAYLOAD/kiravr-build-id")" || die "This AppImage is damaged (no build id)."
+    [[ -f "$INSTALL/kiravr-build-id" ]] && installed="$(cat "$INSTALL/kiravr-build-id")"
+    debug "Bundled build $wanted, installed build ${installed:-none}"
+    if [[ "$wanted" == "$installed" ]]; then
+        debug "Installed copy is current"
+        return 0
+    fi
+
+    info "Installing KiraVR $(cat "$PAYLOAD/kiravr-version") to $INSTALL"
+    mkdir -p "$INSTALL_ROOT" || die "Cannot create $INSTALL_ROOT"
+    rm -rf "$INSTALL.new" "$INSTALL.old"
+    cp -a "$PAYLOAD" "$INSTALL.new" || { rm -rf "$INSTALL.new"; die "Copying to $INSTALL_ROOT failed (disk full?)"; }
+    # Swap whole folders. A running vrserver keeps its already loaded driver,
+    # copying over a loaded .so would crash it.
+    if [[ -d "$INSTALL" ]]; then
+        mv "$INSTALL" "$INSTALL.old" || die "Cannot replace $INSTALL"
+    fi
+    mv "$INSTALL.new" "$INSTALL" || die "Cannot move the new copy into place"
+    rm -rf "$INSTALL.old"
+    if pgrep -x vrserver >/dev/null; then
+        warn "SteamVR is running the previous build. Restart SteamVR to use this one."
+    fi
+    ok "Installed"
+}
+
+# A menu entry that starts this AppImage, kept pointing at where it is now.
+desktop_entry() {
+    [[ "${KIRAVR_NO_DESKTOP_ENTRY:-0}" == "1" ]] && return 0
+    [[ -n "${APPIMAGE:-}" ]] || { debug "Not started as an AppImage, no menu entry"; return 0; }
+    local exec_line="Exec=\"$APPIMAGE\" %U"
+    if [[ -f "$DESKTOP_FILE" ]] && grep -qxF "$exec_line" "$DESKTOP_FILE"; then
+        debug "Menu entry is current"
+        return 0
+    fi
+    mkdir -p "$(dirname "$DESKTOP_FILE")" "$(dirname "$ICON_FILE")"
+    cp "$APPDIR/dev.daggenthal.kiravr.png" "$ICON_FILE"
+    sed "s|^Exec=.*|$exec_line|" "$APPDIR/dev.daggenthal.kiravr.desktop" > "$DESKTOP_FILE"
+    command -v update-desktop-database >/dev/null && update-desktop-database "$DATA_HOME/applications" 2>/dev/null
+    ok "Added KiraVR to the application menu"
+}
+
+for arg in "$@"; do
+    [[ "$arg" == "--uninstall" ]] && uninstall
+done
+
+[[ "$(uname -m)" == "x86_64" ]] || die "KiraVR needs an x86_64 PC, this is $(uname -m)."
+install_streamer
+desktop_entry || warn "Could not add the menu entry"
+
+# The dashboard does not need the AppImage's variables, and SteamVR started
+# from it should not see them either.
+unset APPDIR APPIMAGE ARGV0 OWD
+debug "Starting $INSTALL/bin/alvr_dashboard $*"
+exec "$INSTALL/bin/alvr_dashboard" "$@"

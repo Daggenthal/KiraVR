@@ -298,6 +298,7 @@ dependencies = [
  "alvr_server_io",
  "alvr_session",
  "alvr_sockets",
+ "alvr_system_info",
  "chrono",
  "cros-libva",
  "eframe",

@@ -1547,7 +1547,10 @@ pub struct LoggingConfig {
     #[schema(flag = "real-time")]
     pub show_raw_events: Switch<RawEventsConfig>,
 
-    #[schema(strings(help = "Write logs into the session_log.txt file."))]
+    #[schema(strings(
+        display_name = "Log to Disk",
+        help = "Writes everything KiraVR logs to alvr_session_log.txt in your home folder (session_log.txt next to the dashboard on Windows). Needed for useful bug reports. Applies after SteamVR restarts. Also in the Diagnostics tab."
+    ))]
     pub log_to_disk: bool,
 
     #[schema(flag = "real-time")]

@@ -111,13 +111,17 @@ desktop_entry() {
     [[ "${KIRAVR_NO_DESKTOP_ENTRY:-0}" == "1" ]] && return 0
     [[ -n "${APPIMAGE:-}" ]] || { debug "Not started as an AppImage, no menu entry"; return 0; }
     local exec_line="Exec=\"$APPIMAGE\" %U"
-    if [[ -f "$DESKTOP_FILE" ]] && grep -qxF "$exec_line" "$DESKTOP_FILE"; then
+    local wanted
+    wanted="$(sed "s|^Exec=.*|$exec_line|" "$APPDIR/dev.daggenthal.kiravr.desktop")"
+    # Refreshed when the AppImage moved, or a new build changed the entry or icon.
+    if [[ -f "$DESKTOP_FILE" && "$(cat "$DESKTOP_FILE")" == "$wanted" ]] \
+        && cmp -s "$APPDIR/dev.daggenthal.kiravr.png" "$ICON_FILE"; then
         debug "Menu entry is current"
         return 0
     fi
     mkdir -p "$(dirname "$DESKTOP_FILE")" "$(dirname "$ICON_FILE")"
     cp "$APPDIR/dev.daggenthal.kiravr.png" "$ICON_FILE"
-    sed "s|^Exec=.*|$exec_line|" "$APPDIR/dev.daggenthal.kiravr.desktop" > "$DESKTOP_FILE"
+    printf '%s\n' "$wanted" > "$DESKTOP_FILE"
     command -v update-desktop-database >/dev/null && update-desktop-database "$DATA_HOME/applications" 2>/dev/null
     ok "Added KiraVR to the application menu"
 }

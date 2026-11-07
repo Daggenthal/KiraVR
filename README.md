@@ -1,4 +1,9 @@
-<p align="center"> <img width="500" src="resources/ALVR-Grey.svg"/> </p>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="resources/kiravr/png/kiravr-wordmark-dark.png">
+    <img width="450" alt="KiraVR" src="resources/kiravr/png/kiravr-wordmark-light.png">
+  </picture>
+</p>
 
 > [!IMPORTANT]
 > **This is KiraVR, an unofficial fork of [ALVR](https://github.com/alvr-org/ALVR).** 🐧

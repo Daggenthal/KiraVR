@@ -1,64 +1,30 @@
+<!-- KiraVR icon (Kira Star), same shapes as resources/kiravr/generate.py.
+     The 256 unit design sits centered in a 384 unit viewport, which keeps it
+     inside the adaptive icon safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
-    android:viewportWidth="247.19"
-    android:viewportHeight="247.2">
-  <group android:scaleX="0.48997378"
-      android:scaleY="0.49"
-      android:translateX="63.03669"
-      android:translateY="63.036">
-    <group>
-      <clip-path
-          android:pathData="m19.24,27.3 l48.9,43.32 -19.6,44.33 18.17,46.96 -45.21,41.35 2.17,43.95 223.52,-0.01 0.01,-247.19 -215.11,0.14z"/>
-      <path
-          android:pathData="M123.59,123.6m-115.38,0a115.38,115.38 0,1 1,230.77 0a115.38,115.38 0,1 1,-230.77 0"
-          android:strokeWidth="16.4055"
-          android:fillColor="#00000000">
-        <aapt:attr name="android:strokeColor">
-          <gradient 
-              android:startX="-0"
-              android:startY="123.6"
-              android:endX="247.17"
-              android:endY="123.6"
-              android:type="linear">
-            <item android:offset="0" android:color="#FF3ED2E3"/>
-            <item android:offset="1" android:color="#FF1D89CF"/>
-          </gradient>
-        </aapt:attr>
-      </path>
-      <path
-          android:pathData="M123.59,123.6m-85.3,0a85.3,85.3 0,1 1,170.6 0a85.3,85.3 0,1 1,-170.6 0"
-          android:strokeWidth="15.875"
-          android:fillColor="#00000000">
-        <aapt:attr name="android:strokeColor">
-          <gradient 
-              android:startX="32.22"
-              android:startY="123.6"
-              android:endX="214.95"
-              android:endY="123.6"
-              android:type="linear">
-            <item android:offset="0" android:color="#FF3ED2E3"/>
-            <item android:offset="1" android:color="#FF2192D1"/>
-          </gradient>
-        </aapt:attr>
-      </path>
-      <path
-          android:pathData="M123.59,123.6m-56.33,0a56.33,56.33 0,1 1,112.67 0a56.33,56.33 0,1 1,-112.67 0"
-          android:strokeWidth="15.5123"
-          android:fillColor="#00000000">
-        <aapt:attr name="android:strokeColor">
-          <gradient 
-              android:startX="63.25"
-              android:startY="123.6"
-              android:endX="183.92"
-              android:endY="123.6"
-              android:type="linear">
-            <item android:offset="0" android:color="#FF3ED2E3"/>
-            <item android:offset="1" android:color="#FF279ED4"/>
-          </gradient>
-        </aapt:attr>
-      </path>
-    </group>
+    android:viewportWidth="384"
+    android:viewportHeight="384">
+  <group android:translateX="64" android:translateY="64">
+    <path android:pathData="M128,132m-100,0a100,100 0,1 1,200 0a100,100 0,1 1,-200 0">
+      <aapt:attr name="android:fillColor">
+        <gradient android:type="radial" android:centerX="128" android:centerY="132" android:gradientRadius="100">
+          <item android:offset="0" android:color="#59FFB547"/>
+          <item android:offset="1" android:color="#00FFB547"/>
+        </gradient>
+      </aapt:attr>
+    </path>
+    <path android:pathData="M126,42 Q138.9,121.1 218,134 Q138.9,146.9 126,226 Q113.1,146.9 34,134 Q113.1,121.1 126,42 Z">
+      <aapt:attr name="android:fillColor">
+        <gradient android:type="linear" android:startX="126" android:startY="42" android:endX="126" android:endY="226">
+          <item android:offset="0" android:color="#FFFFF8E1"/>
+          <item android:offset="1" android:color="#FFFFAA33"/>
+        </gradient>
+      </aapt:attr>
+    </path>
+    <path android:pathData="M196,46 Q199.2,62.8 216,66 Q199.2,69.2 196,86 Q192.8,69.2 176,66 Q192.8,62.8 196,46 Z" android:fillColor="#FFFFF3CF"/>
+    <path android:pathData="M62,188 Q63.9,198.1 74,200 Q63.9,201.9 62,212 Q60.1,201.9 50,200 Q60.1,198.1 62,188 Z" android:fillColor="#FFFFD27A"/>
   </group>
 </vector>

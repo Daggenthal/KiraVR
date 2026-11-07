@@ -43,6 +43,18 @@ JAVA_HOME_IN_BOX="/usr/lib/jvm/java-17-openjdk-amd64"
 ENV="export JAVA_HOME=$JAVA_HOME_IN_BOX ANDROID_HOME=\"$SDK\" ANDROID_NDK_HOME=\"$SDK/ndk/$NDK_VERSION\""
 JOBS="$(kiravr_jobs)"
 info "Using $JOBS compile jobs (set KIRAVR_JOBS to change)"
+
+# Release builds sign with the KiraVR key when it is here, the same key the
+# GitHub releases use, so local and released APKs update each other in place.
+# Without it xtask makes a throwaway key, and switching between the two needs
+# an uninstall on the headset (which also clears the app's settings).
+SIGNING_DIR="${KIRAVR_SIGNING_DIR:-$HOME/.local/share/kiravr/signing}"
+if [[ "$PROFILE" == "--release" && -f "$SIGNING_DIR/kiravr.keystore" && -f "$SIGNING_DIR/password" ]]; then
+    ENV="$ENV CARGO_APK_RELEASE_KEYSTORE=\"$SIGNING_DIR/kiravr.keystore\" CARGO_APK_RELEASE_KEYSTORE_PASSWORD=\"\$(cat \"$SIGNING_DIR/password\")\""
+    ok "Signing with the KiraVR key from $SIGNING_DIR"
+elif [[ "$PROFILE" == "--release" ]]; then
+    warn "No KiraVR signing key in $SIGNING_DIR, using a local throwaway key"
+fi
 in_box() { distrobox enter "$BOX" -- bash -lc "source \"\$HOME/.cargo/env\" && $ENV && export CARGO_BUILD_JOBS=$JOBS && cd \"$KIRAVR_REPO_DIR\" && $*"; }
 
 SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"

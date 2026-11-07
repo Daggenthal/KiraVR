@@ -1,0 +1,234 @@
+# KiraVR release builds.
+#
+# Push a tag named kiravr-v<version> (the version in Cargo.toml) to build
+# everything and get a draft release to review and publish:
+#   git tag -s kiravr-v21.0.0-dev14 -m "KiraVR 21.0.0-dev14" && git push origin kiravr-v21.0.0-dev14
+# Run it by hand (Actions, KiraVR Release, Run workflow) to only build and
+# download the files from the run, without a release.
+#
+# Secrets (Settings, Secrets and variables, Actions):
+#   KIRAVR_KEYSTORE_BASE64    The signing key, base64 (from ~/.local/share/kiravr/signing)
+#   KIRAVR_KEYSTORE_PASSWORD  Its password
+# Every release must be signed with the same key, or updating the headset app
+# needs an uninstall. Tag builds fail without the key, manual runs fall back
+# to a throwaway key with a warning.
+
+name: KiraVR Release
+
+on:
+  push:
+    tags: ["kiravr-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Read the version and check the tag
+        id: version
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Versions with a suffix (21.0.0-dev14) are pre-releases.
+          [[ "$version" == *-* ]] && echo "prerelease=true" >> "$GITHUB_OUTPUT" || echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "kiravr-v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($version). Expected kiravr-v$version."
+            exit 1
+          fi
+          echo "Building KiraVR $version"
+
+  android:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: "platforms;android-32 build-tools;34.0.0"
+
+      - uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+
+      - name: Set up the signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KIRAVR_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KIRAVR_KEYSTORE_PASSWORD }}
+        run: |
+          if [[ -z "$KEYSTORE_BASE64" || -z "$KEYSTORE_PASSWORD" ]]; then
+            if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+              echo "::error::The KIRAVR_KEYSTORE_BASE64 and KIRAVR_KEYSTORE_PASSWORD secrets are missing. A release signed with another key cannot update installed apps."
+              exit 1
+            fi
+            echo "::warning::No signing key secrets, this APK is signed with a throwaway key and cannot update an installed KiraVR app."
+            exit 0
+          fi
+          keystore="$RUNNER_TEMP/kiravr.keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$keystore"
+          echo "CARGO_APK_RELEASE_KEYSTORE=$keystore" >> "$GITHUB_ENV"
+          echo "::add-mask::$KEYSTORE_PASSWORD"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+
+      - name: Build the headset app
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cargo xtask prepare-deps --platform android --ci
+          cargo xtask build-client --release
+          mkdir -p out
+          cp build/alvr_client_android/alvr_client_android.apk "out/KiraVR-${{ needs.version.outputs.version }}.apk"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android
+          path: out/*.apk
+
+  linux:
+    needs: [version, android]
+    # glibc 2.39 is the floor for the AppImage, matching the local build box.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux
+
+      - name: Install build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config nasm cmake clang libclang-dev \
+            libva-dev libdrm-dev libvulkan-dev libx264-dev libasound2-dev libxrandr-dev \
+            libunwind-dev libgtk-3-dev libpipewire-0.3-dev libspa-0.2-dev libssl-dev
+
+      - name: Build the streamer
+        run: cargo xtask package-streamer --ci
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: android
+          path: build/alvr_client_android
+
+      - name: Pack the AppImage
+        run: |
+          scripts/build-appimage.sh
+          version="${{ needs.version.outputs.version }}"
+          mkdir -p out
+          mv "build/KiraVR-$version-x86_64.AppImage" out/
+          tar -C build/debug-symbols -cJf "out/KiraVR-$version-linux-debug-symbols.tar.xz" "$version"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: out/*
+
+  windows:
+    needs: [version, android]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+
+      - uses: crazy-max/ghaction-chocolatey@v4
+        with:
+          args: install zip unzip pkgconfiglite
+
+      - name: Build the streamer
+        run: cargo xtask package-streamer --gpl --ci
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: android
+          path: apk
+
+      - name: Bundle the headset app and zip
+        shell: pwsh
+        run: |
+          $version = "${{ needs.version.outputs.version }}"
+          # On Windows the dashboard looks for the APK next to itself.
+          Copy-Item (Get-ChildItem apk/*.apk | Select-Object -First 1).FullName build/alvr_streamer_windows/kiravr_client.apk
+          New-Item -ItemType Directory -Force out | Out-Null
+          Compress-Archive -Path build/alvr_streamer_windows -DestinationPath "out/KiraVR-$version-windows-x64.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: out/*
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, android, linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums and release notes
+        run: |
+          cd artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          version="${{ needs.version.outputs.version }}"
+          cat > ../notes.md <<EOF
+          ## Install
+
+          **Linux (SteamOS, Arch, Fedora 40+, Ubuntu 24.04+):** Download \`KiraVR-$version-x86_64.AppImage\`, make it executable and start it. It adds KiraVR to the app menu. Then plug in the headset and use **Installation, Headset App, Install on Headset** in the dashboard.
+
+          **Headset:** The dashboard installs the app for you. To do it by hand: \`adb install -r KiraVR-$version.apk\`.
+
+          **Windows (experimental, untested):** Unzip \`KiraVR-$version-windows-x64.zip\` and run the dashboard inside.
+
+          \`KiraVR-$version-linux-debug-symbols.tar.xz\` is only needed to read crash reports. \`SHA256SUMS.txt\` has the checksums.
+          EOF
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: KiraVR ${{ needs.version.outputs.version }}
+          draft: true
+          prerelease: ${{ needs.version.outputs.prerelease == 'true' }}
+          body_path: notes.md
+          files: artifacts/*

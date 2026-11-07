@@ -147,17 +147,21 @@ fn signal(pids: &[u32], signal: &str) {
 }
 
 // Waits until the check passes or the time is up. True if it passed.
+// Shows a countdown in the dashboard while it waits.
 fn wait_for(timeout: Duration, check: impl Fn(&VrProcesses) -> bool) -> bool {
     let start = Instant::now();
-    loop {
+    super::set_wait(Some(timeout));
+    let passed = loop {
         if check(&scan()) {
-            return true;
+            break true;
         }
         if start.elapsed() >= timeout {
-            return false;
+            break false;
         }
         thread::sleep(Duration::from_millis(500));
-    }
+    };
+    super::set_wait(None);
+    passed
 }
 
 // After SteamVR was asked to quit: Waits for every part of it, Steam's record

@@ -48,6 +48,23 @@ pub fn is_busy() -> bool {
 
 fn set_status(status: Option<&str>) {
     *STATUS.lock() = status.map(str::to_owned);
+    if status.is_none() {
+        *WAIT.lock() = None;
+    }
+}
+
+// The wait in progress: When it started and how long it may take at most,
+// so the dashboard can show a countdown instead of a frozen message.
+static WAIT: Mutex<Option<(Instant, Duration)>> = Mutex::new(None);
+
+fn set_wait(timeout: Option<Duration>) {
+    *WAIT.lock() = timeout.map(|t| (Instant::now(), t));
+}
+
+// (elapsed, longest it can take) of the current wait.
+pub fn wait_progress() -> Option<(Duration, Duration)> {
+    WAIT.lock()
+        .map(|(start, total)| (start.elapsed().min(total), total))
 }
 
 // The name of a running Steam game, if any (Linux only for now).

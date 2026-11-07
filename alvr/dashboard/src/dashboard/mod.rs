@@ -301,13 +301,15 @@ impl eframe::App for Dashboard {
                                     self.restart_game_confirm = None;
                                     self.restart_steamvr(&mut requests);
                                 }
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{game} is running. Quit it first, restarting SteamVR kills it."
-                                    ))
-                                    .size(12.0)
-                                    .color(theme::log_colors::WARNING_LIGHT),
-                                );
+                                Frame::new().inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "{game} is running. Quit it first, restarting SteamVR kills it."
+                                        ))
+                                        .size(12.0)
+                                        .color(theme::log_colors::WARNING_LIGHT),
+                                    );
+                                });
                             } else if connected_to_server {
                                 if ui.add_enabled(!busy, Button::new("Restart SteamVR")).clicked() {
                                     match crate::steamvr_launcher::running_game() {
@@ -325,18 +327,38 @@ impl eframe::App for Dashboard {
                                 crate::steamvr_launcher::LAUNCHER.lock().launch_steamvr();
                             }
                             if let Some(status) = crate::steamvr_launcher::status() {
-                                ui.label(
-                                    RichText::new(status)
-                                        .size(12.0)
-                                        .color(theme::log_colors::WARNING_LIGHT),
-                                );
-                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+                                Frame::new().inner_margin(Margin::symmetric(10, 4)).show(ui, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            RichText::new(status)
+                                                .size(12.0)
+                                                .color(theme::log_colors::WARNING_LIGHT),
+                                        );
+                                        // Waits end early once everything is ready, so this
+                                        // is the longest it can take.
+                                        if let Some((elapsed, total)) =
+                                            crate::steamvr_launcher::wait_progress()
+                                        {
+                                            let left = total.saturating_sub(elapsed).as_secs();
+                                            ui.add(
+                                                egui::ProgressBar::new(
+                                                    elapsed.as_secs_f32() / total.as_secs_f32(),
+                                                )
+                                                .desired_height(14.0)
+                                                .text(
+                                                    RichText::new(format!("up to {left} s"))
+                                                        .size(11.0),
+                                                ),
+                                            );
+                                        }
+                                    });
+                                });
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                             }
 
                             ui.horizontal(|ui| {
-                                ui.add_space(4.0);
+                                ui.add_space(10.0);
                                 ui.label(RichText::new("SteamVR:").size(13.0));
-                                ui.add_space(-10.0);
                                 ui.with_layout(
                                     Layout::centered_and_justified(Direction::LeftToRight),
                                     |ui| {

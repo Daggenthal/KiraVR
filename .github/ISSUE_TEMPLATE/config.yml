@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: ALVR (the project KiraVR is based on)
+    url: https://github.com/alvr-org/ALVR
+    about: For problems with ALVR itself. Please do not send KiraVR problems there.

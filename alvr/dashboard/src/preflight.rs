@@ -189,7 +189,7 @@ fn steamvr_bool(key: &str) -> Option<bool> {
     defaults["steamvr"][key].as_bool()
 }
 
-fn steam_root() -> Option<PathBuf> {
+pub(crate) fn steam_root() -> Option<PathBuf> {
     if let Ok(path) = alvr_server_io::steamvr_settings_file_path() {
         // .../Steam/config/steamvr.vrsettings
         return path.parent()?.parent().map(Path::to_owned);

@@ -29,6 +29,8 @@ KiraVR is a fork of [ALVR](https://github.com/alvr-org/ALVR). It keeps every set
 - **AppImage:** One file that runs on most Linux distributions and adds itself to the app menu.
 - **In-VR performance overlay:** FPS, latency, bitrate, packet loss and the headset battery (with power draw and time left), right inside the headset. Hold both thumbsticks to show it, pin it to your wrist or grab it with a laser pointer to move it.
 - **Audio follows the headset:** While streaming, your PC's sound and microphone switch to the headset and switch back afterwards.
+- **Diagnostics for bug reports:** One click collects versions, hardware, SteamVR, headset, changed settings and recent logs, with your user name, PC name, addresses and serial numbers removed. You read it before sharing it.
+- **No forced updates:** Nothing updates by itself. New versions are only installed after you confirm twice, the last 3 versions are kept, and you can switch back with a click.
 - **Clear version messages:** If the headset app and the PC do not match, both sides say so and tell you what to update.
 
 ## 📦 Install
@@ -50,7 +52,14 @@ KiraVR is a fork of [ALVR](https://github.com/alvr-org/ALVR). It keeps every set
    3. In **Installation, Headset App**, click **Install on Headset**.
 5. **Connect:** Start KiraVR on the headset (Library, Unknown Sources), click **Trust** next to it in the dashboard, then **Launch SteamVR**.
 
-To update, download the new AppImage and start it. It replaces the installed copy and the dashboard tells you when the headset app needs an update too.
+### Updates are your choice
+
+KiraVR never downloads or installs anything by itself.
+
+- **Checking:** The dashboard can ask GitHub at startup whether a new version exists, and only shows a notice. Turn it off under Installation, Updates (or Settings, Extra, Check for Updates on Start), and KiraVR does not contact GitHub at all. **Check for Updates** in the same place checks once when you click it.
+- **Updating:** Download the new AppImage and start it. It asks twice before it replaces your installed version. Say no and it keeps your version, and it will not ask again for that build (`--update` asks again).
+- **Going back:** The last 3 versions are kept. Switch back under Installation, Updates, **Switch to This Version**. If a new version does not even start, run `./KiraVR-*.AppImage --rollback`. Both ask twice too.
+- **Headset app:** Updating or going back on the headset is also confirmed twice, and going back warns that the app's settings may be reset.
 
 ### Windows
 
@@ -58,7 +67,7 @@ Windows builds are made automatically with every release, but nobody has tested 
 
 ### Uninstall
 
-Run `./KiraVR-*.AppImage --uninstall`. It removes the installed copy, the menu entry and the SteamVR driver registration. Settings stay in `~/.config/alvr`. Remove the headset app in the headset's app library.
+Run `./KiraVR-*.AppImage --uninstall`. It removes the installed copy, the kept older versions, the menu entry and the SteamVR driver registration. Settings stay in `~/.config/alvr`. Remove the headset app in the headset's app library.
 
 ## 🩺 Troubleshooting
 
@@ -68,7 +77,7 @@ Run `./KiraVR-*.AppImage --uninstall`. It removes the installed copy, the menu e
 - **SteamVR Home hangs or the menu does not react:** Turn SteamVR Home off (System Check does this too).
 - **Choppy stream:** Connect the PC with a cable and keep the headset near the router. The performance overlay shows packet loss and where the latency comes from.
 
-When you open an issue, add both log files and say which headset, GPU and distribution you use.
+**Reporting a problem:** Open the **Diagnostics** tab, click **Collect Diagnostics**, read it over and paste it into a [new issue](https://github.com/Daggenthal/KiraVR/issues/new?template=bug_report.yml). Without a working dashboard: `./KiraVR-*.AppImage --diagnostics > diagnostics.md`.
 
 ## 🔧 Building from source
 

@@ -355,9 +355,12 @@ fn install(report: Report) -> alvr_common::anyhow::Result<(String, Option<String
     let installed_at = Instant::now();
     if let Err(e) = send() {
         let text = format!("{e}");
-        if text.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE") {
-            // Signed with another key: Cannot update in place. Only then
-            // remove it first, since that also clears its saved data.
+        if text.contains("INSTALL_FAILED_UPDATE_INCOMPATIBLE")
+            || text.contains("INSTALL_FAILED_VERSION_DOWNGRADE")
+        {
+            // Signed with another key, or an older version (the user
+            // confirmed going back twice): Cannot replace in place. Only
+            // then remove it first, since that also clears its saved data.
             report(
                 3,
                 "Replacing an incompatible older version...",

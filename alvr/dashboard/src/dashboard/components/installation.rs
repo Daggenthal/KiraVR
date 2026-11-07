@@ -20,6 +20,10 @@ pub struct InstallationTab {
     system_check: SystemCheck,
     #[cfg(not(target_arch = "wasm32"))]
     headset_app: crate::headset_app::HeadsetApp,
+    #[cfg(not(target_arch = "wasm32"))]
+    headset_confirm: TwoStepConfirm,
+    #[cfg(not(target_arch = "wasm32"))]
+    updates: UpdatesSection,
 }
 
 impl InstallationTab {
@@ -31,11 +35,21 @@ impl InstallationTab {
             system_check: SystemCheck::default(),
             #[cfg(not(target_arch = "wasm32"))]
             headset_app: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            headset_confirm: TwoStepConfirm::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            updates: UpdatesSection::default(),
         }
     }
 
     pub fn update_drivers(&mut self, list: Vec<PathBuf>) {
         self.drivers = list;
+    }
+
+    // KiraVR: Mirrors the "Check for Updates on Start" setting.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn update_auto_check(&mut self, enabled: bool) {
+        self.updates.auto_check = Some(enabled);
     }
 
     pub fn ui(&mut self, ui: &mut Ui) -> Vec<InstallationTabRequest> {
@@ -60,7 +74,10 @@ impl InstallationTab {
                 self.system_check.ui(ui);
 
                 #[cfg(not(target_arch = "wasm32"))]
-                headset_app_ui(&self.headset_app, ui);
+                headset_app_ui(&self.headset_app, &mut self.headset_confirm, ui);
+
+                #[cfg(not(target_arch = "wasm32"))]
+                self.updates.ui(ui, &mut requests);
 
                 ui.vertical_centered_justified(|ui| {
                     if ui.button("Run setup wizard").clicked() {
@@ -121,7 +138,7 @@ impl InstallationTab {
 // KiraVR: "Headset App" section: Shows what is connected over USB and
 // installs the app bundled with this streamer.
 #[cfg(not(target_arch = "wasm32"))]
-fn headset_app_ui(app: &crate::headset_app::HeadsetApp, ui: &mut Ui) {
+fn headset_app_ui(app: &crate::headset_app::HeadsetApp, confirm: &mut TwoStepConfirm, ui: &mut Ui) {
     use crate::headset_app::{HeadsetState, Job, bundled_version};
     use alvr_gui_common::theme::log_colors;
     use eframe::egui::{Button, ProgressBar};
@@ -147,6 +164,8 @@ fn headset_app_ui(app: &crate::headset_app::HeadsetApp, ui: &mut Ui) {
             });
             ui.add_space(4.0);
 
+            // Changing the version of an installed app is asked twice.
+            let mut change: Option<(String, String)> = None;
             let (status, color, can_install, button) = match app.state() {
                 None => ("Looking for a headset...".to_owned(), theme::FG, false, "Install on Headset"),
                 Some(HeadsetState::NoAdb) => (
@@ -190,12 +209,32 @@ fn headset_app_ui(app: &crate::headset_app::HeadsetApp, ui: &mut Ui) {
                 Some(HeadsetState::Connected {
                     model,
                     installed_version: Some(installed),
-                }) => (
-                    format!("{model} connected, has v{installed}, this streamer is v{bundled}. They must match."),
-                    log_colors::WARNING_LIGHT,
-                    true,
-                    "Update Headset App",
-                ),
+                }) => {
+                    let older = matches!(
+                        (
+                            alvr_common::semver::Version::parse(&installed),
+                            alvr_common::semver::Version::parse(&bundled),
+                        ),
+                        (Ok(i), Ok(b)) if b < i
+                    );
+                    change = Some(if older {
+                        (
+                            format!("Go back from v{installed} to the older v{bundled} on the headset?"),
+                            "Going back to an older app can reset its settings on the headset, so you may have to trust the headset again. Continue?".to_owned(),
+                        )
+                    } else {
+                        (
+                            format!("Update the headset app from v{installed} to v{bundled}?"),
+                            "The headset app is replaced now. You can go back later by switching the PC to an older version in Updates and installing again. Continue?".to_owned(),
+                        )
+                    });
+                    (
+                        format!("{model} connected, has v{installed}, this streamer is v{bundled}. They must match."),
+                        log_colors::WARNING_LIGHT,
+                        true,
+                        if older { "Install Older Headset App" } else { "Update Headset App" },
+                    )
+                }
             };
             ui.label(RichText::new(status).color(color));
 
@@ -209,8 +248,20 @@ fn headset_app_ui(app: &crate::headset_app::HeadsetApp, ui: &mut Ui) {
             ui.add_space(4.0);
             let label = if working { "Installing..." } else { button };
             if ui
-                .add_enabled(can_install && has_apk && !working, Button::new(label))
+                .add_enabled(
+                    can_install && has_apk && !working && !confirm.is_open(),
+                    Button::new(label),
+                )
                 .clicked()
+            {
+                if change.is_some() {
+                    confirm.open("headset");
+                } else {
+                    app.install(ui.ctx());
+                }
+            }
+            if let Some((first, second)) = &change
+                && confirm.ui(ui, "headset", first, second, button)
             {
                 app.install(ui.ctx());
             }
@@ -258,6 +309,220 @@ fn headset_app_ui(app: &crate::headset_app::HeadsetApp, ui: &mut Ui) {
             }
         });
     ui.add_space(6.0);
+}
+
+// KiraVR: Asks twice before something that changes what is installed. Either
+// step can be cancelled, and nothing happens until the second "yes".
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct TwoStepConfirm {
+    key: Option<String>,
+    second: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TwoStepConfirm {
+    fn open(&mut self, key: &str) {
+        self.key = Some(key.to_owned());
+        self.second = false;
+    }
+
+    fn is_open(&self) -> bool {
+        self.key.is_some()
+    }
+
+    // Shows the open step for this key. True once the user confirmed both.
+    fn ui(&mut self, ui: &mut Ui, key: &str, first: &str, second: &str, action: &str) -> bool {
+        use alvr_gui_common::theme::log_colors;
+
+        if self.key.as_deref() != Some(key) {
+            return false;
+        }
+        let mut confirmed = false;
+        Frame::group(ui.style())
+            .fill(theme::DARKER_BG)
+            .inner_margin(theme::FRAME_PADDING)
+            .show(ui, |ui| {
+                let (step, text) = if self.second { (2, second) } else { (1, first) };
+                ui.label(
+                    RichText::new(format!("Confirm ({step} of 2)"))
+                        .strong()
+                        .color(log_colors::WARNING_LIGHT),
+                );
+                ui.label(text);
+                ui.horizontal(|ui| {
+                    let yes = if self.second { action } else { "Continue" };
+                    if ui.button(yes).clicked() {
+                        if self.second {
+                            confirmed = true;
+                            self.key = None;
+                        } else {
+                            self.second = true;
+                        }
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.key = None;
+                    }
+                });
+            });
+        confirmed
+    }
+}
+
+// KiraVR: Updates. Checking is always the user's choice, installing too:
+// KiraVR never replaces itself. Kept versions can be switched back to.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+struct UpdatesSection {
+    auto_check: Option<bool>,
+    checking: Option<std::sync::mpsc::Receiver<Result<crate::versions::UpdateCheck, String>>>,
+    check_result: Option<Result<crate::versions::UpdateCheck, String>>,
+    confirm: TwoStepConfirm,
+    message: Option<(bool, String)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl UpdatesSection {
+    fn ui(&mut self, ui: &mut Ui, requests: &mut Vec<InstallationTabRequest>) {
+        use crate::versions::{self, UpdateCheck};
+        use alvr_gui_common::theme::log_colors;
+        use eframe::egui::{Button, OpenUrl};
+
+        if let Some(receiver) = &self.checking
+            && let Ok(result) = receiver.try_recv()
+        {
+            self.check_result = Some(result);
+            self.checking = None;
+        }
+
+        Frame::group(ui.style())
+            .fill(theme::SECTION_BG)
+            .inner_margin(theme::FRAME_PADDING)
+            .show(ui, |ui| {
+                ui.vertical_centered_justified(|ui| {
+                    ui.label(RichText::new("Updates").size(18.0));
+                });
+                ui.add_space(4.0);
+                let install = if versions::is_appimage_install() {
+                    "AppImage"
+                } else {
+                    "not an AppImage install"
+                };
+                ui.label(RichText::new(format!("KiraVR v{} ({install})", *alvr_common::ALVR_VERSION)).strong());
+                ui.label(
+                    "KiraVR never downloads or installs updates by itself. You decide when to \
+                     update, an AppImage asks twice before it replaces this version, and older \
+                     versions are kept so you can go back.",
+                );
+                ui.add_space(4.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    let busy = self.checking.is_some();
+                    let label = if busy { "Checking..." } else { "Check for Updates" };
+                    if ui.add_enabled(!busy, Button::new(label)).clicked() {
+                        let (sender, receiver) = std::sync::mpsc::channel();
+                        let ctx = ui.ctx().clone();
+                        std::thread::spawn(move || {
+                            sender
+                                .send(versions::check_for_update().map_err(|e| format!("{e:#}")))
+                                .ok();
+                            ctx.request_repaint();
+                        });
+                        self.checking = Some(receiver);
+                        self.check_result = None;
+                    }
+                    if let Some(mut enabled) = self.auto_check
+                        && ui
+                            .checkbox(&mut enabled, "Check for Updates on Start")
+                            .on_hover_text(
+                                "One request to GitHub when the dashboard opens. Off means KiraVR never contacts GitHub by itself.",
+                            )
+                            .changed()
+                    {
+                        self.auto_check = Some(enabled);
+                        requests.push(InstallationTabRequest::ServerRequest(
+                            crate::dashboard::ServerRequest::SetSessionValues(vec![
+                                alvr_packets::PathValuePair {
+                                    path: alvr_packets::parse_path(
+                                        "session_settings.extra.new_version_popup.enabled",
+                                    )
+                                    .unwrap(),
+                                    value: serde_json::Value::Bool(enabled),
+                                },
+                            ]),
+                        ));
+                    }
+                });
+                match &self.check_result {
+                    Some(Ok(UpdateCheck::UpToDate)) => {
+                        ui.label(RichText::new("You have the latest version.").color(theme::OK_GREEN));
+                    }
+                    Some(Ok(UpdateCheck::Available { version })) => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!("KiraVR v{version} is available."))
+                                    .color(log_colors::INFO_LIGHT),
+                            );
+                            if ui.button("Open Download Page").clicked() {
+                                ui.ctx().open_url(OpenUrl::new_tab(versions::RELEASES_PAGE));
+                            }
+                        });
+                    }
+                    Some(Err(e)) => {
+                        ui.label(RichText::new(e).color(log_colors::ERROR_LIGHT));
+                    }
+                    None => (),
+                }
+
+                let Some(root) = versions::install_root().filter(|_| versions::is_appimage_install())
+                else {
+                    return;
+                };
+                ui.add_space(6.0);
+                let kept = versions::previous(&root);
+                if kept.is_empty() {
+                    ui.label(
+                        RichText::new("No older versions kept yet. They appear here after an update.")
+                            .weak(),
+                    );
+                    return;
+                }
+                ui.label(RichText::new("Previous Versions").strong());
+                for (index, old) in kept.iter().enumerate() {
+                    let key = format!("version-{index}");
+                    ui.horizontal(|ui| {
+                        ui.label(format!("v{} (build {})", old.version, old.build_id));
+                        if ui
+                            .add_enabled(!self.confirm.is_open(), Button::new("Switch to This Version"))
+                            .clicked()
+                        {
+                            self.confirm.open(&key);
+                            self.message = None;
+                        }
+                    });
+                    let current = &*alvr_common::ALVR_VERSION;
+                    let first = format!("Switch KiraVR from v{current} to v{}?", old.version);
+                    let second = format!(
+                        "The dashboard restarts as v{}. v{current} is kept, so you can switch back here. \
+                         Install the matching headset app afterwards. Switch now?",
+                        old.version
+                    );
+                    if self.confirm.ui(ui, &key, &first, &second, "Switch Now") {
+                        match versions::switch_to(&root, old)
+                            .and_then(|()| versions::restart_dashboard(&root))
+                        {
+                            Ok(()) => std::process::exit(0),
+                            Err(e) => self.message = Some((false, format!("{e:#}"))),
+                        }
+                    }
+                }
+                if let Some((ok, message)) = &self.message {
+                    let color = if *ok { theme::OK_GREEN } else { log_colors::ERROR_LIGHT };
+                    ui.label(RichText::new(message).color(color));
+                }
+            });
+        ui.add_space(6.0);
+    }
 }
 
 // KiraVR: The preflight results, with a fix button where one exists. Checks

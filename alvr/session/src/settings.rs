@@ -1625,6 +1625,13 @@ It does not update in real time.")
     pub velocities_multiplier: f32,
 
     pub open_setup_wizard: bool,
+
+    // KiraVR: Only ever checks and tells. Nothing is downloaded or installed
+    // without the user, see the Updates section of the Installation tab.
+    #[schema(strings(
+        display_name = "Check for Updates on Start",
+        help = "Asks GitHub once at startup whether a newer KiraVR exists and shows a notice. KiraVR never downloads or installs updates by itself. When off, KiraVR does not contact GitHub at all."
+    ))]
     pub new_version_popup: Switch<NewVersionPopupConfig>,
 }
 
@@ -2284,11 +2291,8 @@ pub fn session_settings_default() -> SettingsDefault {
             },
             wired_client_type: ClientFlavorDefault {
                 Custom: "dev.daggenthal.kiravr".to_owned(),
-                variant: if alvr_common::is_stable() {
-                    ClientFlavorDefaultVariant::Store
-                } else {
-                    ClientFlavorDefaultVariant::Github
-                },
+                // KiraVR has no store app, only the GitHub builds.
+                variant: ClientFlavorDefaultVariant::Github,
             },
             wired_client_autolaunch: SwitchDefault {
                 enabled: true,

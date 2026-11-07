@@ -51,6 +51,8 @@ enum Tab {
     #[cfg(not(target_arch = "wasm32"))]
     Installation,
     Logs,
+    #[cfg(not(target_arch = "wasm32"))]
+    Diagnostics,
     Debug,
     About,
 }
@@ -67,6 +69,8 @@ pub struct Dashboard {
     settings_tab: SettingsTab,
     #[cfg(not(target_arch = "wasm32"))]
     installation_tab: components::InstallationTab,
+    #[cfg(not(target_arch = "wasm32"))]
+    diagnostics_tab: components::DiagnosticsTab,
     logs_tab: LogsTab,
     notification_bar: NotificationBar,
     setup_wizard: SetupWizard,
@@ -94,6 +98,8 @@ impl Dashboard {
                 #[cfg(not(target_arch = "wasm32"))]
                 (Tab::Installation, "💾  Installation"),
                 (Tab::Logs, "📝  Logs"),
+                #[cfg(not(target_arch = "wasm32"))]
+                (Tab::Diagnostics, "🩺  Diagnostics"),
                 (Tab::Debug, "🐞  Debug"),
                 (Tab::About, "ℹ  About"),
             ]
@@ -104,6 +110,8 @@ impl Dashboard {
             settings_tab: SettingsTab::new(),
             #[cfg(not(target_arch = "wasm32"))]
             installation_tab: components::InstallationTab::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            diagnostics_tab: components::DiagnosticsTab::new(),
             logs_tab: LogsTab::new(),
             notification_bar: NotificationBar::new(),
             setup_wizard: SetupWizard::new(),
@@ -164,6 +172,9 @@ impl eframe::App for Dashboard {
                     let settings = session.to_settings();
 
                     self.connections_tab.update_client_list(&session);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.installation_tab
+                        .update_auto_check(settings.extra.new_version_popup.as_option().is_some());
                     self.settings_tab.update_session(&session.session_settings);
                     self.logs_tab.update_settings(&settings);
                     self.notification_bar.update_settings(&settings);
@@ -323,6 +334,8 @@ impl eframe::App for Dashboard {
                                 }
                             }
                             Tab::Logs => self.logs_tab.ui(ui),
+                            #[cfg(not(target_arch = "wasm32"))]
+                            Tab::Diagnostics => self.diagnostics_tab.ui(ui),
                             Tab::Debug => {
                                 if let Some(request) = components::debug_tab_ui(ui) {
                                     requests.push(request);

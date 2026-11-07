@@ -3,7 +3,11 @@
 
 mod dashboard;
 #[cfg(not(target_arch = "wasm32"))]
+mod diagnostics;
+#[cfg(not(target_arch = "wasm32"))]
 mod headset_app;
+#[cfg(not(target_arch = "wasm32"))]
+mod versions;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod data_sources;
@@ -56,6 +60,20 @@ fn main() {
                 apply_fixes,
                 &get_filesystem_layout(),
             ));
+        }
+    }
+
+    // KiraVR: `alvr_dashboard --diagnostics [--no-logs]` prints the bug
+    // report text (personal details removed) and exits.
+    {
+        let args = env::args().collect::<Vec<_>>();
+        if args.iter().any(|a| a == "--diagnostics") {
+            let report = diagnostics::collect(&diagnostics::Options {
+                include_logs: !args.iter().any(|a| a == "--no-logs"),
+            });
+            println!("{}", report.text);
+            eprintln!("{}", report.removed_summary());
+            std::process::exit(0);
         }
     }
 

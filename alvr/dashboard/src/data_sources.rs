@@ -157,7 +157,14 @@ impl DataSources {
 
                     let version_str = version_data
                         .get("tag_name")
-                        .and_then(|v| Some(v.as_str()?.trim_start_matches("v")))?;
+                        // KiraVR tags are kiravr-v1.0.0.
+                        .and_then(|v| {
+                            Some(
+                                v.as_str()?
+                                    .trim_start_matches("kiravr-")
+                                    .trim_start_matches('v'),
+                            )
+                        })?;
 
                     let version = version_str.parse::<Version>().ok();
 

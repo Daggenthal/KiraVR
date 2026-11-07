@@ -1,0 +1,55 @@
+name: Bug Report
+description: Something in KiraVR does not work as it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! This is the KiraVR tracker. Please do not report KiraVR problems to ALVR.
+
+        **Diagnostics make this much faster:** In the KiraVR dashboard, open **Diagnostics**, click **Collect Diagnostics**, read it over, then **Copy to Clipboard** and paste it below. Your user name, PC name, IP and MAC addresses, Steam IDs and headset serial numbers are removed automatically.
+        No dashboard? Run `./KiraVR-*.AppImage --diagnostics > diagnostics.md` in a terminal and attach the file.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What Happened
+      description: What went wrong, and what did you expect instead?
+      placeholder: The stream freezes for a second every few minutes in Beat Saber.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we make it happen? Leave it empty if you do not know.
+      placeholder: |
+        1. Connect over Wi-Fi
+        2. Start Beat Saber
+        3. Play for about 5 minutes
+  - type: dropdown
+    id: how-often
+    attributes:
+      label: How Often
+      options:
+        - Every time
+        - Often
+        - Sometimes
+        - Happened once
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste the text from the Diagnostics tab here. It keeps its own formatting, long parts are folded.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before Sending
+      options:
+        - label: I read the Diagnostics text and it contains nothing I want to keep private.
+          required: true
+        - label: I use the KiraVR app on the headset, not the ALVR app.
+          required: true

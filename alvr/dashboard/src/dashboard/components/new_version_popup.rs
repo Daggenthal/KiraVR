@@ -51,7 +51,11 @@ impl NewVersionPopup {
                             ui.spacing_mut().item_spacing.x = 5.0;
                             ui.style_mut().spacing.button_padding = egui::vec2(10.0, 4.0);
 
-                            ui.heading("You can download this version using the launcher:");
+                            ui.heading(if self.launcher_path.is_some() {
+                                "You can download this version using the launcher:"
+                            } else {
+                                "Download the new version and start it:"
+                            });
 
                             if let Some(path) = &self.launcher_path {
                                 if ui.button("Open Launcher").clicked()
@@ -59,16 +63,17 @@ impl NewVersionPopup {
                                 {
                                     shutdown_alvr_cb();
                                 }
-                            } else if ui.button("Download Launcher").clicked() {
-                                let base_url =
-                                    "https://github.com/Daggenthal/KiraVR/releases/latest/download/";
+                            } else if ui.button("Download").clicked() {
+                                // The release workflow's file names.
+                                let version = &self.version;
                                 let file = if cfg!(windows) {
-                                    "alvr_launcher_windows.zip"
+                                    format!("KiraVR-{version}-windows-x64.zip")
                                 } else {
-                                    "alvr_launcher_linux.tar.gz"
+                                    format!("KiraVR-{version}-x86_64.AppImage")
                                 };
-
-                                context.open_url(OpenUrl::new_tab(format!("{base_url}{file}")));
+                                context.open_url(OpenUrl::new_tab(format!(
+                                    "https://github.com/Daggenthal/KiraVR/releases/download/kiravr-v{version}/{file}"
+                                )));
                             }
                         });
 

@@ -6,6 +6,7 @@
 #
 # Environment:
 #   KIRAVR_BOX=name     Distrobox name (default: kiravr-build)
+#   KIRAVR_IMAGE=image  Box image (default: Ubuntu 24.04; 22.04 gives an older glibc)
 #   KIRAVR_JOBS=n       Parallel compile jobs (default: half the CPU threads,
 #                       a quarter while SteamVR runs, so VR is not OOM-killed)
 #   KIRAVR_DEBUG=1      Log every command, keep going past errors
@@ -14,7 +15,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 BOX="${KIRAVR_BOX:-kiravr-build}"
-IMAGE="docker.io/library/ubuntu:24.04"
+IMAGE="${KIRAVR_IMAGE:-docker.io/library/ubuntu:24.04}"
 NVIDIA=0
 PROFILE="--release"
 SKIP_DEPS=0

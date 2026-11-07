@@ -35,6 +35,12 @@ if [[ ! -f "$STREAMER/share/alvr/kiravr_client.apk" ]]; then
         || warn "No headset APK: The AppImage will work, but \"Install on Headset\" stays off"
 fi
 
+# appimagetool refuses to pack without it.
+command -v desktop-file-validate >/dev/null || {
+    error "desktop-file-validate is missing. Install desktop-file-utils (apt, dnf and pacman all call it that)."
+    exit 1
+}
+
 if [[ ! -x "$APPIMAGETOOL" ]]; then
     info "Downloading appimagetool $APPIMAGETOOL_VERSION"
     mkdir -p "$TOOLS"

@@ -3,7 +3,7 @@
 // saves or opens a new GitHub issue.
 
 use alvr_gui_common::theme;
-use eframe::egui::{Button, Frame, OpenUrl, RichText, ScrollArea, TextEdit, Ui};
+use eframe::egui::{Button, CollapsingHeader, Frame, OpenUrl, RichText, ScrollArea, TextEdit, Ui};
 use std::sync::mpsc::{self, Receiver};
 
 const NEW_ISSUE_URL: &str =
@@ -17,6 +17,9 @@ pub struct DiagnosticsTab {
     // The last saved file, for "Open Folder".
     saved: Option<std::path::PathBuf>,
     running: Option<Receiver<crate::diagnostics::Report>>,
+    // Mirrors Settings, Extra, Logging, Log to Disk. None until the session
+    // is known.
+    log_to_disk: Option<bool>,
 }
 
 impl DiagnosticsTab {
@@ -28,10 +31,16 @@ impl DiagnosticsTab {
             status: None,
             saved: None,
             running: None,
+            log_to_disk: None,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn update_log_to_disk(&mut self, enabled: bool) {
+        self.log_to_disk = Some(enabled);
+    }
+
+    pub fn ui(&mut self, ui: &mut Ui) -> Vec<crate::dashboard::ServerRequest> {
+        let mut requests = vec![];
         if let Some(receiver) = &self.running
             && let Ok(report) = receiver.try_recv()
         {
@@ -71,6 +80,36 @@ impl DiagnosticsTab {
                             .color(theme::OK_GREEN),
                         );
                         ui.add_space(6.0);
+
+                        // The session log is the most useful part of a report and
+                        // off by default, so the switch is right here.
+                        if let Some(mut enabled) = self.log_to_disk {
+                            let changed = ui
+                                .checkbox(&mut enabled, "Log to Disk")
+                                .on_hover_text(
+                                    "Writes the session log (alvr_session_log.txt in your home folder). Same as Settings, Extra, Logging, Log to Disk.",
+                                )
+                                .changed();
+                            if changed {
+                                self.log_to_disk = Some(enabled);
+                                requests.push(crate::dashboard::ServerRequest::SetSessionValues(vec![
+                                    alvr_packets::PathValuePair {
+                                        path: alvr_packets::parse_path(
+                                            "session_settings.extra.logging.log_to_disk",
+                                        )
+                                        .unwrap(),
+                                        value: serde_json::Value::Bool(enabled),
+                                    },
+                                ]));
+                            }
+                            let note = if enabled {
+                                "The session log is on. After turning it on, restart SteamVR and reproduce the problem, then collect."
+                            } else {
+                                "The session log is off, so reports only contain errors. Turn it on, restart SteamVR and reproduce the problem first."
+                            };
+                            ui.label(RichText::new(note).weak());
+                            ui.add_space(4.0);
+                        }
 
                         ui.horizontal_wrapped(|ui| {
                             ui.checkbox(&mut self.include_logs, "Include Recent Logs");
@@ -147,13 +186,22 @@ impl DiagnosticsTab {
                 }
                 ui.add_space(4.0);
 
-                ui.add(
-                    TextEdit::multiline(&mut self.text)
-                        .code_editor()
-                        .desired_width(f32::INFINITY)
-                        .desired_rows(24),
-                );
+                // Open after collecting, so it gets read before sharing. One
+                // click folds it away, the buttons above keep working.
+                let lines = self.text.lines().count();
+                CollapsingHeader::new(RichText::new(format!("Report ({lines} lines)")).strong())
+                    .id_salt("diagnostics_report")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add(
+                            TextEdit::multiline(&mut self.text)
+                                .code_editor()
+                                .desired_width(f32::INFINITY)
+                                .desired_rows(24),
+                        );
+                    });
             });
+        requests
     }
 
     fn start(&mut self, ctx: &eframe::egui::Context) {

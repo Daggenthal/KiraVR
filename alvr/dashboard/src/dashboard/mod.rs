@@ -175,6 +175,9 @@ impl eframe::App for Dashboard {
                     #[cfg(not(target_arch = "wasm32"))]
                     self.installation_tab
                         .update_auto_check(settings.extra.new_version_popup.as_option().is_some());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    self.diagnostics_tab
+                        .update_log_to_disk(settings.extra.logging.log_to_disk);
                     self.settings_tab.update_session(&session.session_settings);
                     self.logs_tab.update_settings(&settings);
                     self.notification_bar.update_settings(&settings);
@@ -335,7 +338,7 @@ impl eframe::App for Dashboard {
                             }
                             Tab::Logs => self.logs_tab.ui(ui),
                             #[cfg(not(target_arch = "wasm32"))]
-                            Tab::Diagnostics => self.diagnostics_tab.ui(ui),
+                            Tab::Diagnostics => requests.extend(self.diagnostics_tab.ui(ui)),
                             Tab::Debug => {
                                 if let Some(request) = components::debug_tab_ui(ui) {
                                     requests.push(request);

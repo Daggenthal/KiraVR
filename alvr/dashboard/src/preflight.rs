@@ -58,6 +58,7 @@ pub enum Fix {
     DisableSteamVrHome,
     KillLeftovers(Vec<u32>),
     AddFirewallRules,
+    DeleteLeftoverShm(Vec<PathBuf>),
 }
 
 impl Fix {
@@ -67,6 +68,7 @@ impl Fix {
             Fix::DisableSteamVrHome => "Turn Off SteamVR Home",
             Fix::KillLeftovers(_) => "Close Leftover SteamVR Processes",
             Fix::AddFirewallRules => "Add Firewall Rules",
+            Fix::DeleteLeftoverShm(_) => "Delete Leftover Files",
         }
     }
 }
@@ -95,8 +97,11 @@ impl Check {
     }
 }
 
-const CHECKS: [(&str, fn() -> Check); 11] = [
+const CHECKS: [(&str, fn() -> Check); 14] = [
     ("steam_install", steam_install),
+    ("steam_client", steam_client),
+    ("memory", memory),
+    ("temporary_files", temporary_files),
     ("steamvr_installed", steamvr_installed),
     ("leftover_processes", leftover_processes),
     ("prism", prism),
@@ -162,6 +167,7 @@ pub fn apply_fix(fix: &Fix, layout: &alvr_filesystem::Layout) -> Result<String> 
             })?;
             Ok("Added the firewall rules.".into())
         }
+        Fix::DeleteLeftoverShm(paths) => delete_leftover_shm(paths),
     }
 }
 
@@ -1055,6 +1061,365 @@ pub fn print_report(apply_fixes: bool, layout: &alvr_filesystem::Layout) -> i32 
     }
 }
 
+// --- Memory, temporary files and the Steam client (2026-11-06) ---
+//
+// Low memory made Steam's web helper crash every few seconds ("double free",
+// fontconfig "out of memory"), worst with SteamVR running, until Steam shut
+// itself down and took the game with it. Swap was full because 3.6 GB of
+// RAM-backed temporary files were left over.
+
+const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MemInfo {
+    total: u64,
+    available: u64,
+    swap_total: u64,
+    swap_free: u64,
+}
+
+fn parse_meminfo(text: &str) -> Option<MemInfo> {
+    let field = |key: &str| {
+        text.lines().find_map(|line| {
+            let rest = line.strip_prefix(key)?.strip_prefix(':')?;
+            rest.split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+                .map(|kb| kb * 1024)
+        })
+    };
+    Some(MemInfo {
+        total: field("MemTotal")?,
+        available: field("MemAvailable")?,
+        swap_total: field("SwapTotal").unwrap_or(0),
+        swap_free: field("SwapFree").unwrap_or(0),
+    })
+}
+
+fn assess_memory(m: MemInfo) -> (Status, String) {
+    let gb = |b: u64| b as f64 / GB;
+    let swap_used = m.swap_total.saturating_sub(m.swap_free);
+    let swap_share = if m.swap_total > 0 {
+        swap_used as f64 / m.swap_total as f64
+    } else {
+        0.0
+    };
+    let summary = format!(
+        "{:.1} of {:.1} GB of RAM free, swap {:.1} of {:.1} GB used.",
+        gb(m.available),
+        gb(m.total),
+        gb(swap_used),
+        gb(m.swap_total)
+    );
+    let advice = "Programs that need more memory now crash, Steam's web helper first, and Steam \
+                  can shut down in the middle of a game. Close programs you do not need, check \
+                  Temporary Files below, then restart Steam.";
+    if swap_share >= 0.95 || m.available < (1.5 * GB) as u64 {
+        (
+            Status::Error,
+            format!("Memory is almost gone: {summary} {advice}"),
+        )
+    } else if swap_share >= 0.75 || m.available < (3.0 * GB) as u64 {
+        (
+            Status::Warning,
+            format!(
+                "Memory is getting tight: {summary} Close programs you do not need before playing."
+            ),
+        )
+    } else if m.swap_total < (4.0 * GB) as u64 {
+        (
+            Status::Info,
+            format!(
+                "{summary} Only {:.1} GB of swap: A swap file of 8 GB gives more room before things crash.",
+                gb(m.swap_total)
+            ),
+        )
+    } else {
+        (Status::Ok, summary)
+    }
+}
+
+fn memory() -> Check {
+    const TITLE: &str = "Memory";
+    match fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|t| parse_meminfo(&t))
+    {
+        Some(info) => {
+            let (status, detail) = assess_memory(info);
+            Check::new(TITLE, status, detail)
+        }
+        None => Check::new(TITLE, Status::Info, "Could not read /proc/meminfo."),
+    }
+}
+
+// Files younger than this are never called leftovers: A program may have
+// just created them, or be restarting.
+const SHM_MIN_AGE: Duration = Duration::from_secs(30 * 60);
+// Files that exist on purpose without being open: Podman's lock (distrobox
+// needs it), POSIX semaphores, and Steam's own IPC files.
+const SHM_KEEP_PREFIXES: &[&str] = &["libpod", "sem.", ".com.valvesoftware.", "lttng"];
+
+// Every /dev/shm file some process has open or mapped, and how many of the
+// user's own processes could not be looked into (they run with extra rights,
+// like Decky plugins), so their files are unknown.
+fn shm_files_in_use() -> (std::collections::HashSet<PathBuf>, usize) {
+    use std::os::unix::fs::MetadataExt;
+    let mut used = std::collections::HashSet::new();
+    let mut hidden = 0;
+    let me = fs::metadata("/proc/self").map(|m| m.uid()).ok();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return (used, hidden);
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+        {
+            continue;
+        }
+        let own = me.is_some() && entry.metadata().map(|m| m.uid()).ok() == me;
+        let fds = fs::read_dir(entry.path().join("fd"));
+        let maps = fs::read_to_string(entry.path().join("maps"));
+        if own && (fds.is_err() || maps.is_err()) {
+            hidden += 1;
+        }
+        for fd in fds.into_iter().flatten().flatten() {
+            if let Ok(target) = fs::read_link(fd.path())
+                && target.starts_with("/dev/shm/")
+            {
+                used.insert(target);
+            }
+        }
+        for line in maps.iter().flat_map(|m| m.lines()) {
+            if let Some(at) = line.find("/dev/shm/") {
+                used.insert(PathBuf::from(line[at..].trim_end_matches(" (deleted)")));
+            }
+        }
+    }
+    (used, hidden)
+}
+
+// "u1000-Shm_*" for "u1000-Shm_8e10b10a": Groups leftovers by program.
+fn shm_group(name: &str) -> String {
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_hexdigit());
+    if stem.len() < name.len() && stem.len() >= 3 {
+        format!("{stem}*")
+    } else {
+        name.to_owned()
+    }
+}
+
+struct ShmLeftovers {
+    paths: Vec<PathBuf>,
+    bytes: u64,
+    // (group, files, bytes), largest first.
+    groups: Vec<(String, usize, u64)>,
+    // Own processes that could not be checked.
+    hidden: usize,
+}
+
+// The user's own /dev/shm files that no running program uses and that are
+// older than SHM_MIN_AGE, with their size in memory (allocated blocks, they
+// are often sparse).
+fn leftover_shm() -> ShmLeftovers {
+    use std::os::unix::fs::MetadataExt;
+    let mut result = ShmLeftovers {
+        paths: vec![],
+        bytes: 0,
+        groups: vec![],
+        hidden: 0,
+    };
+    let Ok(me) = fs::metadata("/proc/self").map(|m| m.uid()) else {
+        return result;
+    };
+    let (used, hidden) = shm_files_in_use();
+    result.hidden = hidden;
+    let mut groups = std::collections::BTreeMap::<String, (usize, u64)>::new();
+    for entry in fs::read_dir("/dev/shm").into_iter().flatten().flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let old_enough = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= SHM_MIN_AGE);
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let keep = SHM_KEEP_PREFIXES.iter().any(|p| name.starts_with(p));
+        if meta.is_file() && meta.uid() == me && !used.contains(&path) && old_enough && !keep {
+            let size = meta.blocks() * 512;
+            let group = groups.entry(shm_group(&name)).or_default();
+            group.0 += 1;
+            group.1 += size;
+            result.bytes += size;
+            result.paths.push(path);
+        }
+    }
+    result.groups = groups
+        .into_iter()
+        .map(|(name, (files, bytes))| (name, files, bytes))
+        .collect();
+    result.groups.sort_by_key(|g| std::cmp::Reverse(g.2));
+    result
+}
+
+// Used bytes of a RAM-backed (tmpfs) mount, None if it is on disk.
+fn tmpfs_used(mount: &str) -> Option<u64> {
+    let output = Command::new("df")
+        .args(["-B1", "--output=fstype,used", mount])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.lines().nth(1)?.split_whitespace();
+    (fields.next()? == "tmpfs").then_some(())?;
+    fields.next()?.parse().ok()
+}
+
+fn temporary_files() -> Check {
+    const TITLE: &str = "Temporary Files";
+    let leftovers = leftover_shm();
+    let tmp = tmpfs_used("/tmp").filter(|b| *b as f64 >= 2.0 * GB);
+    let tmp_note = tmp
+        .map(|b| {
+            format!(
+                " /tmp is in RAM and holds {:.1} GB, look there for large files you no longer need.",
+                b as f64 / GB
+            )
+        })
+        .unwrap_or_default();
+    let hidden_note = if leftovers.hidden > 0 {
+        format!(
+            " {} of your programs run with extra rights (like Decky plugins) and could not be checked.",
+            leftovers.hidden
+        )
+    } else {
+        String::new()
+    };
+
+    if leftovers.bytes as f64 >= 256.0 * 1024.0 * 1024.0 {
+        let groups = leftovers
+            .groups
+            .iter()
+            .take(4)
+            .map(|(name, files, bytes)| {
+                format!("{name} ({files} files, {:.1} GB)", *bytes as f64 / GB)
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        Check::new(
+            TITLE,
+            Status::Warning,
+            format!(
+                "Leftover files in /dev/shm hold {:.1} GB of RAM: {groups}. No running program has \
+                 them open and they are older than 30 minutes, so a program that crashed or quit \
+                 left them behind (Steam's web helper does this when it crashes).{hidden_note}{tmp_note}",
+                leftovers.bytes as f64 / GB
+            ),
+        )
+        .with_fix(Fix::DeleteLeftoverShm(leftovers.paths))
+    } else if tmp.is_some() {
+        Check::new(TITLE, Status::Warning, tmp_note.trim_start().to_owned())
+    } else {
+        Check::new(
+            TITLE,
+            Status::Ok,
+            "No large leftovers in RAM-backed temporary folders.",
+        )
+    }
+}
+
+// Deletes only files that are still unused right now.
+fn delete_leftover_shm(paths: &[PathBuf]) -> Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let (used, _) = shm_files_in_use();
+    let mut freed = 0;
+    let mut deleted = 0;
+    for path in paths {
+        if used.contains(path) || !path.starts_with("/dev/shm/") {
+            continue;
+        }
+        let size = fs::metadata(path).map(|m| m.blocks() * 512).unwrap_or(0);
+        if fs::remove_file(path).is_ok() {
+            freed += size;
+            deleted += 1;
+        }
+    }
+    Ok(format!(
+        "Deleted {deleted} leftover files and freed {:.1} GB of RAM.",
+        freed as f64 / GB
+    ))
+}
+
+// "beta" for beta channels, "stable" otherwise. SteamOS writes
+// steamdeck_stable into the beta file for its stable channel.
+fn steam_channel(beta_file: Option<&str>) -> (&'static str, String) {
+    match beta_file.map(str::trim).filter(|b| !b.is_empty()) {
+        Some(name) if !name.contains("stable") => ("beta", name.to_owned()),
+        Some(name) => ("stable", name.to_owned()),
+        None => ("stable", "stable".to_owned()),
+    }
+}
+
+// Crash and assert dumps Steam wrote in the last hour.
+fn recent_steam_dumps() -> usize {
+    let Ok(entries) = fs::read_dir("/tmp/dumps") else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".dmp"))
+        .filter(|e| {
+            e.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < Duration::from_secs(3600))
+        })
+        .count()
+}
+
+fn steam_client() -> Check {
+    const TITLE: &str = "Steam Client";
+    let beta = steam_root().and_then(|root| fs::read_to_string(root.join("package/beta")).ok());
+    let (kind, name) = steam_channel(beta.as_deref());
+    let dumps = recent_steam_dumps();
+    let channel = if kind == "beta" {
+        format!("Steam is on the beta channel ({name}).")
+    } else {
+        "Steam is on the stable channel.".to_owned()
+    };
+    if dumps >= 10 {
+        let beta_hint = if kind == "beta" {
+            " Switching Steam to stable can help: Steam, Settings, Interface, Client Beta Participation."
+        } else {
+            ""
+        };
+        Check::new(
+            TITLE,
+            Status::Warning,
+            format!(
+                "Steam crashed or hit an error {dumps} times in the last hour (crash dumps in /tmp/dumps). \
+                 This usually means memory ran out, see Memory and Temporary Files.{beta_hint} {channel}"
+            ),
+        )
+    } else if kind == "beta" {
+        Check::new(
+            TITLE,
+            Status::Info,
+            format!(
+                "{channel} If Steam gets unstable, switch to stable: Steam, Settings, Interface, Client Beta Participation."
+            ),
+        )
+    } else {
+        Check::new(TITLE, Status::Ok, channel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1110,5 +1475,73 @@ mod tests {
         assert!(ports_cover("9943/tcp 9944/tcp", 9944, "tcp"));
         assert!(!ports_cover("9943/tcp", 9943, "udp"));
         assert!(!ports_cover("", 9943, "tcp"));
+    }
+
+    fn mem(total_gb: f64, available_gb: f64, swap_total_gb: f64, swap_free_gb: f64) -> MemInfo {
+        let b = |g: f64| (g * GB) as u64;
+        MemInfo {
+            total: b(total_gb),
+            available: b(available_gb),
+            swap_total: b(swap_total_gb),
+            swap_free: b(swap_free_gb),
+        }
+    }
+
+    #[test]
+    fn memory_levels() {
+        // The 2026-11-06 crash loop: swap full.
+        assert_eq!(assess_memory(mem(15.0, 4.7, 8.7, 0.3)).0, Status::Error);
+        assert_eq!(assess_memory(mem(15.0, 1.0, 16.0, 15.0)).0, Status::Error);
+        assert_eq!(assess_memory(mem(15.0, 5.0, 16.0, 3.0)).0, Status::Warning);
+        assert_eq!(assess_memory(mem(15.0, 7.0, 2.0, 2.0)).0, Status::Info);
+        let (status, detail) = assess_memory(mem(15.0, 7.4, 16.0, 10.0));
+        assert_eq!(status, Status::Ok);
+        assert!(detail.contains("7.4 of 15.0 GB"), "{detail}");
+    }
+
+    #[test]
+    fn reads_meminfo() {
+        let text = "MemTotal:       16000000 kB\nMemFree:  1 kB\nMemAvailable:    8000000 kB\nSwapTotal:       9000000 kB\nSwapFree:          1000 kB\n";
+        let info = parse_meminfo(text).unwrap();
+        assert_eq!(info.total, 16_000_000 * 1024);
+        assert_eq!(info.swap_free, 1000 * 1024);
+        assert!(parse_meminfo("nothing").is_none());
+    }
+
+    #[test]
+    fn steam_channels() {
+        assert_eq!(steam_channel(Some("steamdeck_publicbeta\n")).0, "beta");
+        assert_eq!(steam_channel(Some("steamdeck_stable")).0, "stable");
+        assert_eq!(steam_channel(None).0, "stable");
+        assert_eq!(steam_channel(Some("  ")).0, "stable");
+    }
+
+    #[test]
+    fn groups_leftovers_by_program() {
+        assert_eq!(shm_group("u1000-Shm_8e10b10a"), "u1000-Shm_*");
+        assert_eq!(shm_group("inc1000.098c1cebef83c6d1"), "inc1000.*");
+        assert_eq!(
+            shm_group("u1000-ValveIPCSharedObj-Steam"),
+            "u1000-ValveIPCSharedObj-Steam"
+        );
+    }
+
+    #[test]
+    fn keeps_files_that_exist_on_purpose() {
+        for name in [
+            "libpod_rootless_lock_1000",
+            "sem.foo",
+            ".com.valvesoftware.Steam.awgizR",
+        ] {
+            assert!(
+                SHM_KEEP_PREFIXES.iter().any(|p| name.starts_with(p)),
+                "{name}"
+            );
+        }
+        assert!(
+            !SHM_KEEP_PREFIXES
+                .iter()
+                .any(|p| "u1000-Shm_8e10b10a".starts_with(p))
+        );
     }
 }
